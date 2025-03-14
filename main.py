@@ -19,11 +19,7 @@ from pathlib import Path
 from torch_geometric.data import HeteroData
 
 training_batch_size=1
-num_gpus_per_node=1
-num_nodes=1
-num_gpus_per_model=1
 multistep_input=2
-read_group_size=num_gpus_per_model
 frequency="6h"
 timestep="6h"
 frequency_s = frequency_to_seconds(frequency)
@@ -55,23 +51,12 @@ def graph_data(graph_filename=None) -> HeteroData:
 
     from anemoi.graphs.create import GraphCreator
 
+    #TODO support creating graphs on the fly
     #graph_config = convert_to_omegaconf(self.config).graph
     #return GraphCreator(config=graph_config).create(
     #    overwrite=self.config.graph.overwrite,
     #    save_path=graph_filename,
     #)
-    
-def grid_indices(self) -> type[BaseGridIndices]:
-        reader_group_size = self.config.dataloader.read_group_size
-
-        grid_indices = instantiate(
-            self.config.model_dump(by_alias=True).dataloader.grid_indices,
-            reader_group_size=reader_group_size,
-        )
-        grid_indices.setup(self.graph_data)
-        return grid_indices
-
-
 
 def _get_dataset(
     data_reader: Callable,
@@ -79,6 +64,9 @@ def _get_dataset(
     shuffle: bool = True,
     rollout: int = 1,
     label: str = "generic",
+    num_gpus_per_node : int = 1,
+    num_nodes : int = 1,
+    num_gpus_per_model : int = 1
 ) -> NativeGridDataset:
 
     r = rollout
@@ -106,44 +94,47 @@ def load_batch(dl_iter):
     batch = next(dl_iter)
     elapsed = time.time() - s
     size=batch.element_size() * batch.nelement()
-    print(f"{format(size)} batch loaded in {elapsed:.2f}s.")
+    p0print(f"{format(size)} batch loaded in {elapsed:.2f}s.")
     if elapsed > 1:
         throughput =(size /elapsed)
-        print(f"Dataloader throughput: {format(throughput)}/s")
+        p0print(f"Dataloader process throughput: {format(throughput)}/s")
     return batch, np.array([elapsed, size])
 
 def simulate_iter(rollout=1):
     throughput=0.2
     sleep_time=1/(throughput/rollout)
-    print(f"Simulating an iter with {throughput=} and {rollout=}, sleeping for {sleep_time:.2f}s")
+    p0print(f"Simulating an iter with {throughput=} and {rollout=}, sleeping for {sleep_time:.2f}s")
     time.sleep(sleep_time)
 
-def setup_grid_indices(graph_filename):
-    print(f"Loading the graph '{graph_filename}'...")
+def setup_grid_indices(graph_filename, read_group_size=1):
+    p0print(f"Loading the graph '{graph_filename}' (read group size: {read_group_size})...")
     grid_indices = FullGrid("data", read_group_size)
     grid_indices.setup(graph_data(graph_filename=graph_filename))
-    print("Graph loaded.")
+    p0print("Graph loaded.")
     return grid_indices
 
 
-def create_dataset(dataset, grid_indices, rollout=1):
+def create_dataset(dataset, grid_indices, rollout=1, num_nodes=1, num_gpus_per_node=1, num_gpus_per_model=1):
     r=rollout
-    print(f"Opening the dataset '{dataset}' (rollout {r})...")
+    p0print(f"Opening the dataset '{dataset}' (rollout {r}, {int(num_nodes)} nodes with {num_gpus_per_node} 'GPUs' per node, model split over {num_gpus_per_model} 'GPUs')...")
     ds = _get_dataset(
                 #open_dataset(self.config.model_dump().dataloader.training),
                 open_dataset(dataset=dataset, start=None, end=202312, frequency=frequency, drop=[]),
                 grid_indices,
                 #SyntheticDataset(),
                 label="train",
-                rollout=r
+                rollout=r,
+                num_nodes=num_nodes,
+                num_gpus_per_node=num_gpus_per_node,
+                num_gpus_per_model=num_gpus_per_model,
             )
-    print("Dataset loaded.")
+    p0print("Dataset loaded.")
     return ds
 
 def create_dataloader(ds, b=1, w=1, pf=1, pin_mem=True):
     seed=int(time.time())
     os.environ["ANEMOI_BASE_SEED"] = str(seed)
-    print(f"Creating Dataloader (batch size: {b}, num_workers: {w}, prefetch_factor {pf}, {pin_mem=}, {seed=})...")
+    p0print(f"Creating Dataloader (batch size: {b}, num_workers: {w}, prefetch_factor {pf}, {pin_mem=}, {seed=})...")
     dataloader = DataLoader(
             ds,
             batch_size=b, #self.config.model_dump().dataloader.batch_size[stage],
@@ -155,26 +146,43 @@ def create_dataloader(ds, b=1, w=1, pf=1, pin_mem=True):
             prefetch_factor=pf, #self.config.dataloader.prefetch_factor,
             persistent_workers=True,
     )
-    print("Dataloader created.")
+    p0print("Dataloader created.")
     return dataloader
 
 def clear_page_cache():
-    print("Clearing the page cache...")
+    p0print("Clearing the page cache...")
     os.system("echo 1 > /proc/sys/vm/drop_caches")
-    print("Page cache cleared.")
+    p0print("Page cache cleared.")
+    
+def get_parallel_info():
+    """Reads Slurm env vars, if they exist, to determine if inference is running in parallel"""
+    local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", 0))  # Rank within a node, between 0 and num_gpus
+    global_rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", 0))  # Rank within all nodes
+    world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE", 1))  # Total number of processes
+    procs_per_node = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_SIZE", 1)) #number of processes on the current node
+    num_nodes= world_size/procs_per_node
 
-def run(dataloader_iterator, count=5, simulate_compute=True):
+    return global_rank, local_rank, world_size, procs_per_node, num_nodes
+
+def p0print(str):
+    #I dont love reading an env var for every print
+    if int(os.environ.get("OMPI_COMM_WORLD_RANK", 0)) == 0:
+        print(str)
+
+#TODO distinguish between per node and multinode throughput
+def run(dataloader_iterator, count=5, simulate_compute=True, proc_count=1):
     #clear_page_cache() #permission denied on Atos
     roll_av=False
     averages = np.array([0.0,0.0])
     for i in range(0,count):
-        print(f"Iteration {i}")
+        p0print(f"Iteration {i}")
         _, metrics = load_batch(dataloader_iterator)
+        #TODO add a barrier for all procs here
         #NEED TO KEEP CODE UNDER HERE TO A MINIMUM
         if roll_av:
             #averages = tuple((a * (i) + m) / (i+1) for a, m in zip(averages, metrics))
             averages += metrics
-            print(f"Av time: {averages[0]:.2f}s, Av throughput: {format(averages[1]/averages[0])}")
+            p0print(f"Av time: {averages[0]:.2f}s, Av global throughput: {format(proc_count * averages[1]/averages[0])}B/s")
         else:
             averages += metrics
         if simulate_compute:
@@ -182,7 +190,7 @@ def run(dataloader_iterator, count=5, simulate_compute=True):
     if not roll_av:
         #averages = tuple((av/count for av in averages))
         averages /= count
-        print(f"Av time: {averages[0]:.2f}s, Av throughput: {format(averages[1]/averages[0])}, Total time for {count} runs: {averages[0]*count:.2f}s")
+        p0print(f"Av time: {averages[0]:.2f}s, Av global throughput: {format(proc_count * averages[1]/averages[0])}B/s, Total time for {count} runs: {averages[0]*count:.2f}s")
             
         
 def get_bm_config(test="single-worker-bm"):
@@ -210,20 +218,30 @@ def get_bm_config(test="single-worker-bm"):
     else:
         raise ValueError(f"Error. invalid benchmark. Please select one of '{tests}'")
     
-    print(f"Running a benchmark with the config '{test}'")
+    p0print(f"Running a benchmark with the config '{test}'")
     return config 
             
         
 def manager():
     #TODO support looping over resolutions with different graphs and dataset lists
     config = get_bm_config("single-worker-bm")
-    count=1
+    count=10
     
-    gi = setup_grid_indices(config["graph_filename"])
+    config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
+    
+    #get parallel_info (#TODO refactor into a function which returns RGS, MCGS)
+    global_rank, local_rank, world_size, procs_per_node, num_nodes = get_parallel_info()
+    if global_rank == 0 and world_size > 1:
+        p0print(f"Running in parallel across {world_size} processes over {int(num_nodes)} nodes")
+    num_gpus_per_node=procs_per_node
+    num_gpus_per_model=world_size #TODO allow a mix of data and model parallelism
+    read_group_size=num_gpus_per_model
+    
+    gi = setup_grid_indices(config["graph_filename"], read_group_size=read_group_size)
     
     for dataset in config["datasets"]:
         for r in config["rollouts"]:
-            ds = create_dataset(dataset, grid_indices=gi, rollout=r)
+            ds = create_dataset(dataset, grid_indices=gi, rollout=r, num_nodes=num_nodes, num_gpus_per_node=num_gpus_per_node, num_gpus_per_model=num_gpus_per_model)
             for bs in config["batch_sizes"]:
                 for pf in config["prefetch_factors"]:
                     for nw in config["num_workers"]:
@@ -233,13 +251,16 @@ def manager():
                                 base_count=count
                                 count=count*nw
                             dl_iter = iter(create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm))
-                            print(f"Starting {count} runs with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
-                            run(dl_iter, count=count, simulate_compute=False) 
+                            p0print(f"Proc {global_rank}: Starting {count} runs with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
+                            run(dl_iter, count=count, simulate_compute=False, proc_count=world_size) 
                             if config["per_worker_count"]:
                                 count=base_count
                                 
-                            
 manager()
+                            
+#def __main__():
+#    manager()
+        
 #TODO   add gpu support
 #       measure time spent in HtoD copies
 #       add multiprocess support
