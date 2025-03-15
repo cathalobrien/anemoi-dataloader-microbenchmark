@@ -291,7 +291,7 @@ def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_c
         #av_throughput_per_worker=size/mean_time_per_worker/num_workers #analytically im putting this here but i dont know why
         av_throughput_per_process=av_throughput_per_worker*num_workers #200
         av_throughput_global=av_throughput_per_process*proc_count #400
-        p0print(f"Total time for {count} runs: {total_time:.2f}s")
+        p0print(f"Total time for {count} loads: {total_time:.2f}s")
         p0print(f"avg={mean_time_per_process:.2f}s, max={max_time:.2f}s, min={min_time:.2f}s, std-dev={time_std_dev:.4f}s")
         if num_workers > 1:
             p0print(f"From 'Stalls' (top 1/{num_workers}): avg={stalls.mean():.2f}s, max={stalls.max():.2f}s, min={stalls.min():.2f}s, std-dev={stalls.std():.4f}s")
@@ -344,7 +344,8 @@ def manager():
     config = get_bm_config("single-worker-bm")
     #config = get_bm_config("different-resolutions")
     count=4
-    config["num_workers"]=[2]
+    config["num_workers"]=[6]
+    config["prefetch_factors"]=[2]
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
     
@@ -405,6 +406,8 @@ if __name__ == "__main__":
 #       measure time spent in HtoD copies
 #       Split the 'anemoi' and benchmarking code into different files
 
+
 #Pre-reqs for a scaling run
 #   Multinode support with a mix of model and data parallelism
+
 

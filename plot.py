@@ -23,7 +23,7 @@ def generate_config_strings(varying_values):
 def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out"):
         file=csv
         filename=os.path.basename(file)
-        print(f"Loading {file}")
+        #print(f"Loading {file}")
         df=pd.read_csv(file)
         print(df.head())
         
@@ -62,7 +62,7 @@ def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out"):
         plt.savefig("out.png")
         plt.show()
         
-plot_anemoi_dataloader_benchmark("out/anemoi-dataloader-microbenchmark.csv")
+#plot_anemoi_dataloader_benchmark("out/anemoi-dataloader-microbenchmark.csv")
 
 def plot_mem_monitor(csv, show_plot=True, outdir="out"):
         file=csv
