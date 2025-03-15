@@ -10,6 +10,7 @@ from anemoi.training.data.grid_indices import BaseGridIndices, FullGrid
 from anemoi.utils.dates import frequency_to_seconds
 
 import os
+import subprocess
 import time
 import numpy as np
 from sys import getsizeof
@@ -17,6 +18,18 @@ from collections.abc import Callable
 from hydra.utils import instantiate
 from pathlib import Path
 from torch_geometric.data import HeteroData
+import multiprocessing as mp
+
+from memory_monitor import run_mem_monitor
+from plot import plot_mem_monitor
+
+try:
+    from mpi4py import MPI
+except ImportError:
+    MPI4PY_AVAILABLE=False
+else:
+    MPI4PY_AVAILABLE=True
+    comm = MPI.COMM_WORLD
 
 training_batch_size=1
 multistep_input=2
@@ -92,12 +105,15 @@ def _get_dataset(
 def load_batch(dl_iter):  
     s = time.time()
     batch = next(dl_iter)
+    local_load_time = time.time() - s
+    if MPI4PY_AVAILABLE:
+        comm.Barrier() #every process has to load the batch
     elapsed = time.time() - s
     size=batch.element_size() * batch.nelement()
-    p0print(f"{format(size)} batch loaded in {elapsed:.2f}s.")
+    p0print(f"p0: {format(size)} batch loaded in {elapsed:.2f}s ({elapsed-local_load_time:.2f}s in barrier). ")
     if elapsed > 1:
         throughput =(size /elapsed)
-        p0print(f"Dataloader process throughput: {format(throughput)}/s")
+        p0print(f"p0: dataloader throughput: {format(throughput)}/s")
     return batch, np.array([elapsed, size])
 
 def simulate_iter(rollout=1):
@@ -156,20 +172,29 @@ def clear_page_cache():
     
 def get_parallel_info():
     """Reads Slurm env vars, if they exist, to determine if inference is running in parallel"""
+    
+    if MPI4PY_AVAILABLE:
+        global_rank = comm.Get_rank()
+        world_size= comm.Get_size()
+    else:
+        global_rank = 1
+        world_size = 1
+
+    #TODO change to MPI4PY, this is not portable
     local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", 0))  # Rank within a node, between 0 and num_gpus
-    global_rank = int(os.environ.get("OMPI_COMM_WORLD_RANK", 0))  # Rank within all nodes
-    world_size = int(os.environ.get("OMPI_COMM_WORLD_SIZE", 1))  # Total number of processes
     procs_per_node = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_SIZE", 1)) #number of processes on the current node
     num_nodes= world_size/procs_per_node
+    p0print(f"Running in parallel across {world_size} processes over {int(num_nodes)} nodes")
 
     return global_rank, local_rank, world_size, procs_per_node, num_nodes
 
 def p0print(str):
     #I dont love reading an env var for every print
-    if int(os.environ.get("OMPI_COMM_WORLD_RANK", 0)) == 0:
+    if MPI4PY_AVAILABLE and comm.Get_rank() == 0:
         print(str)
 
 #TODO distinguish between per node and multinode throughput
+#TODO gather metrics from all procs, rather then naively extrapolating from p0
 def run(dataloader_iterator, count=5, simulate_compute=True, proc_count=1):
     #clear_page_cache() #permission denied on Atos
     roll_av=False
@@ -196,6 +221,7 @@ def run(dataloader_iterator, count=5, simulate_compute=True, proc_count=1):
 def get_bm_config(test="single-worker-bm"):
     #set defaults
     config = {}
+    config["test"]=test
     config["res"] = "o1280"
     config["graph_filename"] = "graphs/o1280.graph"
     config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
@@ -204,7 +230,7 @@ def get_bm_config(test="single-worker-bm"):
     config["num_workers"]=[1]
     config["prefetch_factors"]=[1]
     config["pin_mem"]=[True]
-    config["per_worker_count"]=False #if true, multiples count by nw
+    config["per_worker_count"]=True #if true, multiples count by nw
     
     tests=["single-worker-bm", "rollout-bm", "multi-worker-bm"]
     
@@ -220,19 +246,38 @@ def get_bm_config(test="single-worker-bm"):
     
     p0print(f"Running a benchmark with the config '{test}'")
     return config 
+
+def spawn_memory_monitor(test,count, res, r, bs, pf, nw, pm, rank, procs_per_node):
+    if rank == 0:
+        #generate a csv filename based on config
+        os.makedirs(f"out/{test}", exist_ok=True)
+        filename=f"out/{test}/mem-usage-{res}-{count}loads-{r}r-{bs}bs-{pf}pf-{nw}nw-{pm}pm-{procs_per_node}ppn.csv"
+        #p = subprocess.run(["python " "memory_monitor.py " " False", " True ", filename])
+        #never does anything
+        p = mp.Process(target=run_mem_monitor, args=(False,True, filename))
+        p.start()
+        return p, filename
+    else:
+        return None, None
+    
+def terminate_memory_monitor(p, filename, test):
+    #TODO call a mem monitor internal function to close the file before terminating
+    if p is not None:
+        p.terminate()
+    if filename is not None:
+        plot_mem_monitor(filename,show_plot=False,outdir=f"out/{test}")
             
         
 def manager():
     #TODO support looping over resolutions with different graphs and dataset lists
     config = get_bm_config("single-worker-bm")
-    count=10
+    count=2
+    config["num_workers"]=[6]
     
-    config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
+    #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
     
     #get parallel_info (#TODO refactor into a function which returns RGS, MCGS)
     global_rank, local_rank, world_size, procs_per_node, num_nodes = get_parallel_info()
-    if global_rank == 0 and world_size > 1:
-        p0print(f"Running in parallel across {world_size} processes over {int(num_nodes)} nodes")
     num_gpus_per_node=procs_per_node
     num_gpus_per_model=world_size #TODO allow a mix of data and model parallelism
     read_group_size=num_gpus_per_model
@@ -250,20 +295,26 @@ def manager():
                             if config["per_worker_count"]:
                                 base_count=count
                                 count=count*nw
+                            
+                            #TODO break these lines before run into a prelude function, could even make run a class with an __init__ and __del__
                             dl_iter = iter(create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm))
                             p0print(f"Proc {global_rank}: Starting {count} runs with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
-                            run(dl_iter, count=count, simulate_compute=False, proc_count=world_size) 
+                            mem_monitor_proc, csv = spawn_memory_monitor(config["test"], count, config["res"], r, bs, pf, nw, pm, global_rank, procs_per_node)
+                            
+                            run(dl_iter, count=count, simulate_compute=False, proc_count=world_size)
+                            
+                            terminate_memory_monitor(mem_monitor_proc, csv, config["test"])
                             if config["per_worker_count"]:
                                 count=base_count
                                 
-manager()
-                            
+
+if __name__ == "__main__":
+    manager()
 #def __main__():
 #    manager()
         
 #TODO   add gpu support
 #       measure time spent in HtoD copies
-#       add multiprocess support
 #       Incorporate memory monitor, launch it before and rename csv output
 #       Split the 'anemoi' and benchmarking code into different files
 

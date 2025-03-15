@@ -10,6 +10,7 @@ import os
 import time
 import psutil
 import datetime
+import argparse
  
 #TODO refactor mem monitor so that it only gets info once per step and reuses that for table() and csv()
  
@@ -36,7 +37,7 @@ class MemoryMonitor():
     self.pids = pids
     self.csv_filename=None
     
-  def __del__():
+  def __del__(self):
       if self.f is not None:
             self.f.close()
  
@@ -87,31 +88,35 @@ class MemoryMonitor():
         self.f.write(header)
     
     keys = list(list(self.data.values())[0].keys())
-    now = str(int(time.perf_counter() % 1e5))
-    mem = psutil.virtual_memory()
-    system_line=f"{now},system,,,,,,,,{mem.total},{mem.total-mem.available}\n"
+    system_line=f"{self.now},system,,,,,,,,{self.mem.total},{self.mem.total-self.mem.available}\n"
     self.f.write(system_line)
     for pid, data in self.data.items():
         if not self.get_name(pid) == "memory_monitor":
             #mem_stats=tuple(self.format(data[k]) for k in keys if k !="uptime") #want raw numbers
             mem_stats=','.join([str(data[k]) for k in keys])
-            line=f"{now},{self.get_name(pid)},{str(pid)},{mem_stats},,\n"
+            line=f"{self.now},{self.get_name(pid)},{str(pid)},{mem_stats},,\n"
             self.f.write(line)
+            
+    self.f.flush()
+            
+  #Update the monitors records, should be called once per timestep
+  #These numbers are then used to create table and csv
+  def step(self):
+    self._refresh()
+    self.mem=psutil.virtual_memory()
+    self.now = str(int(time.perf_counter() % 1e5))
  
   def table(self) -> str:
-    self._refresh()
-    mem = psutil.virtual_memory()
-    system_mem=f"Total system memory {self.format(mem.total)}, Memory availible {self.format(mem.available)} ({100 - mem.percent}%)\nSystem memory used, according to mlflow: {self.format(mem.used)}\n"
+    system_mem=f"Total system memory {self.format(self.mem.total)}, Memory availible {self.format(self.mem.available)} ({100 - self.mem.percent}%)\nSystem memory used, according to mlflow: {self.format(self.mem.used)}\n"
     table = []
     keys = list(list(self.data.values())[0].keys())
-    now = str(int(time.perf_counter() % 1e5))
     pss_total_mem=0
     for pid, data in self.data.items():
       #table.append((now, str(pid)) + tuple(self.format(data[k]) for k in keys))
       #table.append((now, uptime, self.get_name(pid), str(pid)) + tuple(self.format(data[k]) for k in keys))
       #uptime = datetime.datetime.fromtimestamp(data["uptime"]).strftime("%M:%S")
       #table.append((now, uptime, self.get_name(pid), str(pid)) + tuple(self.format(data[k]) for k in keys if k !="uptime"))
-      table.append((now, self.get_name(pid), str(pid)) + tuple(self.format(data[k],key=k) for k in keys))
+      table.append((self.now, self.get_name(pid), str(pid)) + tuple(self.format(data[k],key=k) for k in keys))
       if self.get_name(pid).startswith("pt_"):
           pss_total_mem += data['pss']
  
@@ -170,27 +175,44 @@ def get_pt_process_pids():
     return pt_process_pids, pnames
  
 
-def monitor_mem():
-    monitor = MemoryMonitor()
+def run_mem_monitor(table, csv, csv_filename):
+  monitor = MemoryMonitor()
+  monitor.step()
+  if table:
     print(monitor.table())
- 
+  if csv:
+    monitor.csv(csv_filename)
+  
+  #if start_method == "forkserver":
+      # Reduce 150M-per-process USS due to "import torch".
+      #mp.set_forkserver_preload(["torch"])
+
+  while True:
+    pids, pnames= get_pt_process_pids()
+    for pid in pids:
+      if pid not in monitor.pids:
+        monitor.add_pid(pid, name=pnames[pid])
+    monitor.step()
+    if table:
+      table=monitor.table()
+      os.system( 'clear' )
+      print(table)
+    if csv:
+      monitor.csv()
+    time.sleep(1)
+  
+
+def main():
+  parser = argparse.ArgumentParser()
+  parser.parse_args()
+  parser.add_argument("table", default=True)
+  parser.add_argument("csv", default=True)
+  parser.add_argument("csv_filename", default="dataloader-mem-usage.csv")
+  args = parser.parse_args()
+
+  run_mem_monitor(args.table, args.csv, args.csv_filename)
+
 # Example usage
-if __name__ == "__main__":
-    monitor = MemoryMonitor()
-    print(monitor.table())
-    monitor.csv("/ec/res4/hpcperm/naco/aifs/dataloader-mem-usage/dataloader-mem-usage.csv")
-    #if start_method == "forkserver":
-        # Reduce 150M-per-process USS due to "import torch".
-        #mp.set_forkserver_preload(["torch"])
- 
-    while True:
-        pids, pnames= get_pt_process_pids()
-        for pid in pids:
-            if pid not in monitor.pids:
-                monitor.add_pid(pid, name=pnames[pid])
-        table=monitor.table()
-        os.system( 'clear' )
-        print(table)
-        monitor.csv()
-        time.sleep(1)
+#if __name__ == "__main__":
+#  main()
         
