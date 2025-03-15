@@ -110,7 +110,7 @@ def load_batch(dl_iter):
         comm.Barrier() #every process has to load the batch
     elapsed = time.time() - s
     size=batch.element_size() * batch.nelement()
-    p0print(f"p0: {format(size)} batch loaded in {elapsed:.2f}s ({elapsed-local_load_time:.2f}s in barrier). ")
+    p0print(f"p0: {format(size)}B batch loaded in {elapsed:.2f}s ({elapsed-local_load_time:.2f}s in barrier). ")
     if elapsed > 1:
         throughput =(size /elapsed)
         p0print(f"p0: dataloader throughput: {format(throughput)}B/s")
@@ -144,7 +144,7 @@ def create_dataset(dataset, grid_indices, rollout=1, num_nodes=1, num_gpus_per_n
                 num_gpus_per_node=num_gpus_per_node,
                 num_gpus_per_model=num_gpus_per_model,
             )
-    p0print("Dataset loaded.")
+    p0print("Dataset opened.")
     return ds
 
 def create_dataloader(ds, b=1, w=1, pf=1, pin_mem=True):
@@ -193,12 +193,32 @@ def p0print(str):
     if MPI4PY_AVAILABLE and comm.Get_rank() == 0:
         print(str)
 
+def create_results_file(filename="anemoi-dataloader-microbenchmark.csv", save_output=True):
+    if save_output:
+        f = open(filename, "a")
+        header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),throughput(byte/s)\n"
+        f.write(header)
+        return f
+    else:
+        return None
+        
+        
+def save_results(f, results, config, count, ds, r, bs, pf, nw, pm, num_procs, save_output=True):
+    #header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),throughput(byte/s)\n"
+    if save_output and f is not None:
+        line=f"{config['res']},{ds},{r},{bs},{nw},{pf},{pm},{count},{num_procs},{results[0]},{results[1]}\n"
+        f.write(line)
+    #f.flush()
+    
+    
+
 #TODO distinguish between per node and multinode throughput
 #TODO gather metrics from all procs, rather then naively extrapolating from p0
-def run(dataloader_iterator, count=5, simulate_compute=True, proc_count=1):
+def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_count=1):
     #clear_page_cache() #permission denied on Atos
     roll_av=False
     averages = np.array([0.0,0.0], dtype=np.float32) #time, size
+    results= [0.0,0.0]
     for i in range(0,count):
         p0print(f"Iteration {i}")
         _, metrics = load_batch(dataloader_iterator)
@@ -208,6 +228,8 @@ def run(dataloader_iterator, count=5, simulate_compute=True, proc_count=1):
             #averages = tuple((a * (i) + m) / (i+1) for a, m in zip(averages, metrics))
             averages += metrics
             p0print(f"Av time: {averages[0]:.2f}s, Av global throughput: {format(proc_count * averages[1]/averages[0])}B/s")
+            results[0]=averages[0]
+            results[1]=proc_count * averages[1]/averages[0]
         else:
             averages += metrics
         if simulate_compute:
@@ -220,11 +242,23 @@ def run(dataloader_iterator, count=5, simulate_compute=True, proc_count=1):
         #comm.Reduce(averages[0], global_elapsed, op=MPI.SUM, root=0) #get the global time spent across all procs but do i need this if i have barriers? 
         #averages[0] = global_elapsed / proc_count
         #averages /= count
-        p0print(f"Av time: {averages[0]:.2f}s, Av global throughput: {format(proc_count * averages[1]/averages[0])}B/s, Total time for {count} runs: {averages[0]*count:.2f}s")
-            
+        av_throughput=averages[1]/averages[0]
+        p0print(f"Av time: {averages[0]:.2f}s, Total time for {count} runs: {averages[0]*count:.2f}s")
+        p0print(f"per-worker BW: {format(av_throughput/num_workers)}B/s,  per-process BW: {format(av_throughput)}B/s, global BW: {format(proc_count * av_throughput)}B/s")
+        #p0print(f"Av BW per worker = {format(av_throughput)}B/s, input batch size = {format(averages[1])}B => compute throughput should be >= {1.0/averages[0]:.3f}it/s to avoid starvation")
         
+        #Is this fair since I'm loading batches one after another with no compute?
+        p0print(f"Compute throughput must be >= {1.0/averages[0]:.3f}it/s ({format(av_throughput)}B/s / {format(averages[1])}B) to avoid starvation")
+        latency=averages[0]*num_workers
+        p0print(f"Est. latency to load the initial batch: {latency:.2f}s") 
+        results[0]=averages[0]
+        results[1]=proc_count * av_throughput
+        
+    return results
+    
 def get_bm_config(test="single-worker-bm"):
     #set defaults
+    
     config = {}
     config["test"]=test
     config["res"] = "o1280"
@@ -280,7 +314,7 @@ def terminate_memory_monitor(p, filename, test):
 def manager():
     #TODO support looping over resolutions with different graphs and dataset lists
     config = get_bm_config("single-worker-bm")
-    count=1
+    count=2
     config["num_workers"]=[2]
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
@@ -292,6 +326,9 @@ def manager():
     read_group_size=num_gpus_per_model
     
     gi = setup_grid_indices(config["graph_filename"], read_group_size=read_group_size)
+    
+    save_output=False
+    f = create_results_file(save_output) #could do this in __init__ if it was a class
     
     for dataset in config["datasets"]:
         for r in config["rollouts"]:
@@ -307,14 +344,20 @@ def manager():
                             
                             #TODO break these lines before run into a prelude function, could even make run a class with an __init__ and __del__
                             dl_iter = iter(create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm))
-                            p0print(f"Proc {global_rank}: Starting {count} runs with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
-                            mem_monitor_proc, csv = spawn_memory_monitor(config, count, r, bs, pf, nw, pm, global_rank, procs_per_node)
+                            p0print(f"Proc {global_rank}: Starting {count} loads with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
+                            if save_output:
+                                mem_monitor_proc, csv = spawn_memory_monitor(config, count, r, bs, pf, nw, pm, global_rank, procs_per_node)
                             
-                            run(dl_iter, count=count, simulate_compute=False, proc_count=world_size)
+                            results = run(dl_iter, nw, count=count, simulate_compute=False, proc_count=world_size)
+                            save_results(f, results, config, count, dataset, r, bs, pf, nw, pm, world_size, save_output=save_output)
                             
-                            terminate_memory_monitor(mem_monitor_proc, csv, config["test"])
+                            if save_output:
+                                terminate_memory_monitor(mem_monitor_proc, csv, config["test"])
                             if config["per_worker_count"]:
                                 count=base_count
+                                
+    if save_output and f is not None:
+        f.close()
                                 
 
 if __name__ == "__main__":
@@ -327,4 +370,7 @@ if __name__ == "__main__":
 #       Split the 'anemoi' and benchmarking code into different files
 #       plot av global throughput across various tests as a bar chart
 #       Sync metrics across all procs, and measure min, max, variance etc
+
+#Pre-reqs for a scaling run
+#   Multinode support with a mix of model and data parallelism
 
