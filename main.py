@@ -102,19 +102,20 @@ def _get_dataset(
         effective_bs=effective_bs,
     )
 
-def load_batch(dl_iter):  
+def load_batch(dl_iter, verbose=True):  
     s = time.time()
     batch = next(dl_iter)
     local_load_time = time.time() - s
     if MPI4PY_AVAILABLE:
         comm.Barrier() #every process has to load the batch
     elapsed = time.time() - s
-    size=batch.element_size() * batch.nelement()
-    p0print(f"p0: {format(size)}B batch loaded in {elapsed:.2f}s ({elapsed-local_load_time:.2f}s in barrier). ")
-    if elapsed > 1:
-        throughput =(size /elapsed)
-        p0print(f"p0: dataloader throughput: {format(throughput)}B/s")
-    return batch, np.array([elapsed, size], dtype=np.float32)
+    if verbose: #could lead to slightly less accurate results since there's more work in between loading batches
+        size=batch.element_size() * batch.nelement()
+        p0print(f"p0: {format(size)}B batch loaded in {elapsed:.2f}s ({elapsed-local_load_time:.2f}s in barrier). ")
+        if elapsed > 1:
+            throughput =(size /elapsed)
+            p0print(f"p0: dataloader throughput: {format(throughput)}B/s")
+    return batch, elapsed
 
 def simulate_iter(rollout=1):
     throughput=0.2
@@ -245,43 +246,65 @@ def save_results(f, results, res, count, ds, r, bs, pf, nw, pm, num_procs, save_
 #TODO gather metrics from all procs, rather then naively extrapolating from p0
 def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_count=1):
     #clear_page_cache() #permission denied on Atos
-    roll_av=False
-    averages = np.array([0.0,0.0], dtype=np.float32) #time, size
-    results= [0.0,0.0]
+
+    #each process maintains a list of their times to load
+    #this will be gathered on proc 0 at the end of the run and the mean, min, max etc will be calculated
+    times = np.array(range(0,count), dtype=np.float32)
+    size = None
     for i in range(0,count):
         p0print(f"Iteration {i}")
-        _, metrics = load_batch(dataloader_iterator)
-        #TODO add a barrier for all procs here
+        batch, times[i] = load_batch(dataloader_iterator)
+        #TODO ensure that batch is overwritten i.e. not a mem leak, cant have N * ~1G batches piling up
         #NEED TO KEEP CODE UNDER HERE TO A MINIMUM
-        if roll_av:
-            #averages = tuple((a * (i) + m) / (i+1) for a, m in zip(averages, metrics))
-            averages += metrics
-            p0print(f"Av time: {averages[0]:.2f}s, Av global throughput: {format(proc_count * averages[1]/averages[0])}B/s")
-            results[0]=averages[0]
-            results[1]=proc_count * averages[1]/averages[0]
-        else:
-            averages += metrics
+        if size is None:
+            size = batch.element_size() * batch.nelement()
+            
         if simulate_compute:
             simulate_iter()
-    if not roll_av:
         #the following code syncs time across all procs and gets the average
-        global_elapsed=np.copy(averages[0])
-        comm.Reduce(averages[0], global_elapsed, op=MPI.SUM, root=0) #get the global time spent across all procs but do i need this if i have barriers? 
-        averages[0] = global_elapsed / proc_count
-        averages /= count
-        av_throughput=averages[1]/averages[0]
-        p0print(f"Av time: {averages[0]:.2f}s, Total time for {count} runs: {averages[0]*count:.2f}s")
-        p0print(f"per-worker BW: {format(av_throughput/num_workers)}B/s,  per-process BW: {format(av_throughput)}B/s, global BW: {format(proc_count * av_throughput)}B/s")
+   #if comm.Get_rank() == 0:
+        
+        
+    global_times = None
+    rank = comm.Get_rank()
+    if rank == 0:
+        global_times = np.empty([proc_count, count], dtype=np.float32)
+        
+    comm.Gather(times, global_times, root=0)
+    
+    if rank == 0:
+        global_times=global_times.flatten() #from 2D [[count]*worldsize] to 1D [count*worldsize]
+        global_times =np.flip(np.sort(global_times)) #largest first
+        mean_time_per_process=global_times.mean()
+        mean_time_per_worker=mean_time_per_process*num_workers #8s
+
+        #The bottom (nw-1)/nw loads tend to be close to 0 since they're loaded in parallel, this tried to extract just the stalls
+        stalls=global_times[0:int(len(global_times)/num_workers)]
+        
+        #TODO I'm sure there's a bug here
+        min_time=global_times.min()
+        max_time=global_times.max()
+        total_time=times.sum()
+        time_std_dev=global_times.std()
+        #mean_time=mean_time_per_worker*num_workers
+        av_throughput_per_worker=size/mean_time_per_worker #100
+        #av_throughput_per_worker=size/mean_time_per_worker/num_workers #analytically im putting this here but i dont know why
+        av_throughput_per_process=av_throughput_per_worker*num_workers #200
+        av_throughput_global=av_throughput_per_process*proc_count #400
+        p0print(f"Total time for {count} runs: {total_time:.2f}s")
+        p0print(f"avg={mean_time_per_process:.2f}s, max={max_time:.2f}s, min={min_time:.2f}s, std-dev={time_std_dev:.4f}s")
+        if num_workers > 1:
+            p0print(f"From 'Stalls' (top 1/{num_workers}): avg={stalls.mean():.2f}s, max={stalls.max():.2f}s, min={stalls.min():.2f}s, std-dev={stalls.std():.4f}s")
+        p0print(f"per-worker BW: {format(av_throughput_per_worker)}B/s,  per-process BW: {format(av_throughput_per_process)}B/s, global BW: {format(av_throughput_global)}B/s")
         #p0print(f"Av BW per worker = {format(av_throughput)}B/s, input batch size = {format(averages[1])}B => compute throughput should be >= {1.0/averages[0]:.3f}it/s to avoid starvation")
         
-        #Is this fair since I'm loading batches one after another with no compute?
-        p0print(f"Compute throughput must be >= {1.0/averages[0]:.3f}it/s ({format(av_throughput)}B/s / {format(averages[1])}B) to avoid starvation")
-        latency=averages[0]*num_workers
+        #Is this fair since I'm loading batches one after another with no compute simulated in between?
+        p0print(f"Compute throughput must be >= {1.0/mean_time_per_process:.3f}it/s ({format(av_throughput_per_process)}B/s / {format(size)}B) to avoid starvation")
+        latency=mean_time_per_worker
         p0print(f"Est. latency to load the initial batch: {latency:.2f}s") 
-        results[0]=averages[0]
-        results[1]=av_throughput
-        
-    return results
+        return [mean_time_per_process, av_throughput_per_process]
+    else:
+        return [None, None]
     
 def get_bm_config(test="single-worker-bm"):
     #set defaults
@@ -318,10 +341,10 @@ def get_bm_config(test="single-worker-bm"):
             
 def manager():
     #TODO support looping over resolutions with different graphs and dataset lists
-    #config = get_bm_config("single-worker-bm")
-    config = get_bm_config("different-resolutions")
-    count=1
-    config["num_workers"]=[1,2]
+    config = get_bm_config("single-worker-bm")
+    #config = get_bm_config("different-resolutions")
+    count=4
+    config["num_workers"]=[2]
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
     
@@ -332,7 +355,7 @@ def manager():
     read_group_size=num_gpus_per_model
     
     
-    save_output=True
+    save_output=False
     f = create_results_file(config,global_rank, save_output=save_output) #could do this in __init__ if it was a class
    
     for res in config["resolutions"]:
@@ -381,8 +404,6 @@ if __name__ == "__main__":
 #TODO   add gpu support
 #       measure time spent in HtoD copies
 #       Split the 'anemoi' and benchmarking code into different files
-#       plot av global throughput across various tests as a bar chart
-#       Sync metrics across all procs, and measure min, max, variance etc
 
 #Pre-reqs for a scaling run
 #   Multinode support with a mix of model and data parallelism
