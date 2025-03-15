@@ -19,6 +19,7 @@ from hydra.utils import instantiate
 from pathlib import Path
 from torch_geometric.data import HeteroData
 import multiprocessing as mp
+import argparse
 
 from memory_monitor import run_mem_monitor
 from plot import plot_mem_monitor, plot_anemoi_dataloader_benchmark
@@ -340,11 +341,16 @@ def get_bm_config(test="single-worker-bm"):
     return config 
             
 def manager():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-m', '--gpus-per-model', type=int, default=0)
+    parser.add_argument('-r','--read-group-size',type=int, default=0)
+    args = parser.parse_args()
+    
     #TODO support looping over resolutions with different graphs and dataset lists
     config = get_bm_config("single-worker-bm")
     #config = get_bm_config("different-resolutions")
     count=4
-    config["num_workers"]=[6]
+    config["num_workers"]=[4]
     config["prefetch_factors"]=[2]
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
@@ -352,8 +358,25 @@ def manager():
     #get parallel_info (#TODO refactor into a function which returns RGS, MCGS)
     global_rank, local_rank, world_size, procs_per_node, num_nodes = get_parallel_info()
     num_gpus_per_node=procs_per_node
-    num_gpus_per_model=world_size #TODO allow a mix of data and model parallelism
-    read_group_size=num_gpus_per_model
+    if args.gpus_per_model != 0:
+        num_gpus_per_model=args.gpus_per_model
+    else:
+        num_gpus_per_model=world_size
+    if args.read_group_size != 0:
+        read_group_size=args.read_group_size
+    else:
+        read_group_size=num_gpus_per_model
+    #check for invalid inputs
+    if read_group_size > num_gpus_per_model:
+        raise ValueError(f"Error! Read group size ({read_group_size}) can't be bigger than model group size ({num_gpus_per_model})")
+    if num_gpus_per_model > world_size:
+        raise ValueError(f"Error! Model group size ({num_gpus_per_model}) can't be bigger than the total number of GPUs ({world_size})")
+    if read_group_size > world_size:
+        raise ValueError(f"Error! Read group size ({read_group_size}) can't be bigger than the total number of GPUs ({world_size})")
+    if num_gpus_per_model % 2 != 0:
+        raise ValueError(f"Error! Model group size ({num_gpus_per_model}) must be a power of 2")
+    if num_gpus_per_model % read_group_size != 0:
+        raise ValueError(f"Error! read group size ({read_group_size}) must divide evenly into model group size ({num_gpus_per_model})")
     
     
     save_output=False
@@ -405,6 +428,8 @@ if __name__ == "__main__":
 #TODO   add gpu support
 #       measure time spent in HtoD copies
 #       Split the 'anemoi' and benchmarking code into different files
+#       Gather time spent at barrier for each proc and analyse them, maybe there's some repeast offenders
+#       distinguish between per node and global throughput (think atos node has 480MB/s max BW)
 
 
 #Pre-reqs for a scaling run
