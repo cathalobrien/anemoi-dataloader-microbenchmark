@@ -113,8 +113,8 @@ def load_batch(dl_iter):
     p0print(f"p0: {format(size)} batch loaded in {elapsed:.2f}s ({elapsed-local_load_time:.2f}s in barrier). ")
     if elapsed > 1:
         throughput =(size /elapsed)
-        p0print(f"p0: dataloader throughput: {format(throughput)}/s")
-    return batch, np.array([elapsed, size])
+        p0print(f"p0: dataloader throughput: {format(throughput)}B/s")
+    return batch, np.array([elapsed, size], dtype=np.float32)
 
 def simulate_iter(rollout=1):
     throughput=0.2
@@ -198,7 +198,7 @@ def p0print(str):
 def run(dataloader_iterator, count=5, simulate_compute=True, proc_count=1):
     #clear_page_cache() #permission denied on Atos
     roll_av=False
-    averages = np.array([0.0,0.0])
+    averages = np.array([0.0,0.0], dtype=np.float32) #time, size
     for i in range(0,count):
         p0print(f"Iteration {i}")
         _, metrics = load_batch(dataloader_iterator)
@@ -213,8 +213,13 @@ def run(dataloader_iterator, count=5, simulate_compute=True, proc_count=1):
         if simulate_compute:
             simulate_iter()
     if not roll_av:
-        #averages = tuple((av/count for av in averages))
-        averages /= count
+        averages = averages / count
+        #the following code syncs time across all procs
+        #but since the measured time includes a global barrier, its not needed. leavinf here as an example for later
+        #global_elapsed=np.copy(averages[0])
+        #comm.Reduce(averages[0], global_elapsed, op=MPI.SUM, root=0) #get the global time spent across all procs but do i need this if i have barriers? 
+        #averages[0] = global_elapsed / proc_count
+        #averages /= count
         p0print(f"Av time: {averages[0]:.2f}s, Av global throughput: {format(proc_count * averages[1]/averages[0])}B/s, Total time for {count} runs: {averages[0]*count:.2f}s")
             
         
@@ -275,8 +280,8 @@ def terminate_memory_monitor(p, filename, test):
 def manager():
     #TODO support looping over resolutions with different graphs and dataset lists
     config = get_bm_config("single-worker-bm")
-    count=10
-    config["num_workers"]=[6]
+    count=1
+    config["num_workers"]=[2]
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
     
