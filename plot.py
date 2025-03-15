@@ -28,13 +28,13 @@ def plot_mem_monitor(csv, show_plot=True, outdir="out"):
                                 plt.plot(subset["time"], subset[metric]/GB, label=f"{process} - {metric}", color=color_map[process], linestyle="-" if metric == "rss" else "--")
 
         plt.xlabel("Time")
-        plt.ylabel("Memory Usage (GB)")
+        plt.ylabel("CPU Memory (GB)")
         plt.title(f"Memory Usage Over Time - {filename}")
         plt.legend(loc="upper left")
         plt.grid()
         #plt.savefig(f"~/Documents/aifs/dl-mem-usage/outputs/{filename}.png")
-        out_file="{outdir}/{filename}.png"
-        print(f"Saving output to {out_file}")
+        out_file=f"{outdir}/{filename}.png"
+        print(f"Plotting memory usage to {out_file}")
         plt.savefig(f"{out_file}")
         if show_plot:
                 plt.show()
