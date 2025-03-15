@@ -2,6 +2,67 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 import os
+import itertools
+
+def get_varying_columns(grouped, columns):
+    varying_columns = []
+    for col in columns:
+        unique_values = grouped[col].unique()  # Get unique values for the column
+        if len(unique_values) > 1:  # Check if more than one unique value exists
+            varying_columns.append((col,list(unique_values)))
+    return varying_columns
+
+def generate_config_strings(varying_values):
+    keys, values = zip(*varying_values)  # Separate keys and their unique values
+    combinations = list(itertools.product(*values))  # Get all possible combinations
+    
+    config_strings = ["\n".join(f"{key}={str(val)[:10]}" for key, val in zip(keys, combo)) for combo in combinations]
+    
+    return config_strings
+
+def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out"):
+        file=csv
+        filename=os.path.basename(file)
+        print(f"Loading {file}")
+        df=pd.read_csv(file)
+        print(df.head())
+        
+        #issue where if you vary res you have a different res and dataset, so have to fuse them bc its really 1 change
+        #also dataset paths are too large to plot
+        # so replace res and dataset with "res-datasetID", and make a lookup table for the ids if we want to print the path later
+        df['datasetID'] = pd.factorize(df['dataset'])[0]
+        dataset_df = df.filter(["datasetID","dataset"], axis=1).drop_duplicates() #works but not unique
+        df['res-ds'] = df.apply(lambda row: f"{row.res}-ds{row.datasetID}", axis=1)
+        df =df.drop(['dataset','datasetID','res'], axis=1)
+        
+        #df_avg = df.groupby("num_workers", as_index=False)["throughput(byte/s)"].mean()
+        grouped = df.groupby(["res-ds", "rollout", "batch_size","num_workers", "prefetch_factor", "pin_memory", "num_procs"], as_index=False).mean()
+        #print(grouped)
+        varying_cols = get_varying_columns(grouped, ["res-ds", "rollout", "batch_size","num_workers", "prefetch_factor", "pin_memory", "num_procs"])
+        #print(varying_cols)
+        configs=generate_config_strings(varying_cols)
+        #print(configs)
+
+        # Extract relevant columns
+        x = configs
+        y = grouped["proc-throughput(byte/s)"]
+
+        # Plot the bar chart
+        plt.figure(figsize=(8, 5))
+        plt.bar(x, y, color="royalblue")
+        #plt.tick_params("x", rotation=45)
+
+        # Labels and title
+        plt.xlabel("Config")
+        plt.ylabel("Throughput (MB/s)")
+        plt.title("Throughput per dataloader")
+        #plt.grid() #goes on top
+
+        # Show the plot
+        plt.savefig("out.png")
+        plt.show()
+        
+plot_anemoi_dataloader_benchmark("out/anemoi-dataloader-microbenchmark.csv")
 
 def plot_mem_monitor(csv, show_plot=True, outdir="out"):
         file=csv
@@ -42,7 +103,6 @@ def plot_mem_monitor(csv, show_plot=True, outdir="out"):
         plt.title(f"Memory Usage Over Time - {filename}")
         plt.legend(loc="upper left")
         plt.grid()
-        #plt.savefig(f"~/Documents/aifs/dl-mem-usage/outputs/{filename}.png")
         out_file=f"{outdir}/{filename}.png"
         print(f"Plotting memory usage to {out_file}")
         plt.savefig(f"{out_file}")

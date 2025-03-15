@@ -21,7 +21,7 @@ from torch_geometric.data import HeteroData
 import multiprocessing as mp
 
 from memory_monitor import run_mem_monitor
-from plot import plot_mem_monitor
+from plot import plot_mem_monitor, plot_anemoi_dataloader_benchmark
 
 try:
     from mpi4py import MPI
@@ -193,22 +193,51 @@ def p0print(str):
     if MPI4PY_AVAILABLE and comm.Get_rank() == 0:
         print(str)
 
-def create_results_file(filename="anemoi-dataloader-microbenchmark.csv", save_output=True):
-    if save_output:
-        f = open(filename, "a")
-        header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),throughput(byte/s)\n"
+def spawn_memory_monitor(res,count, r, bs, pf, nw, pm, rank, procs_per_node):
+    if rank == 0:
+        #generate a csv filename based on config
+        setup=f"mem-usage-{res}-{count}loads-{r}r-{bs}bs-{pf}pf-{nw}nw-{pm}pm-{procs_per_node}ppn" 
+        dir=f"out/{setup}"
+        os.makedirs(dir, exist_ok=True)
+        filename=f"{dir}/{setup}.csv"
+        #p = subprocess.run(["python " "memory_monitor.py " " False", " True ", filename])
+        #never does anything
+        p = mp.Process(target=run_mem_monitor, args=(False,True, filename))
+        p.start()
+        return p, filename
+    else:
+        return None, None
+    
+def terminate_memory_monitor(p, filename, test):
+    #TODO call a mem monitor internal function to close the file before terminating
+    if p is not None:
+        p.terminate()
+    if filename is not None:
+        plot_mem_monitor(filename,show_plot=False,outdir=os.path.dirname(filename))
+
+def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.csv",save_output=True):
+    if save_output and rank==0:
+        #write_header = not os.path.exists(filename)
+        outdir=f"out/"
+        output=f"{outdir}/{filename}"
+        os.makedirs(outdir, exist_ok=True)
+        f = open(output, "w")
+        print(f"Creating output file: {output}")
+        #if write_header:
+        header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),worker-throughput(byte/s),proc-throughput(byte/s),global-throughput(byte/s)\n"
         f.write(header)
+        #f.flush()
         return f
     else:
         return None
         
         
-def save_results(f, results, config, count, ds, r, bs, pf, nw, pm, num_procs, save_output=True):
+def save_results(f, results, res, count, ds, r, bs, pf, nw, pm, num_procs, save_output=True):
     #header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),throughput(byte/s)\n"
     if save_output and f is not None:
-        line=f"{config['res']},{ds},{r},{bs},{nw},{pf},{pm},{count},{num_procs},{results[0]},{results[1]}\n"
+        line=f"{res},{ds},{r},{bs},{nw},{pf},{pm},{count},{num_procs},{results[0]},{results[1]/nw},{results[1]},{results[1]*num_procs}\n"
         f.write(line)
-    #f.flush()
+        #f.flush()
     
     
 
@@ -235,13 +264,11 @@ def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_c
         if simulate_compute:
             simulate_iter()
     if not roll_av:
-        averages = averages / count
-        #the following code syncs time across all procs
-        #but since the measured time includes a global barrier, its not needed. leavinf here as an example for later
-        #global_elapsed=np.copy(averages[0])
-        #comm.Reduce(averages[0], global_elapsed, op=MPI.SUM, root=0) #get the global time spent across all procs but do i need this if i have barriers? 
-        #averages[0] = global_elapsed / proc_count
-        #averages /= count
+        #the following code syncs time across all procs and gets the average
+        global_elapsed=np.copy(averages[0])
+        comm.Reduce(averages[0], global_elapsed, op=MPI.SUM, root=0) #get the global time spent across all procs but do i need this if i have barriers? 
+        averages[0] = global_elapsed / proc_count
+        averages /= count
         av_throughput=averages[1]/averages[0]
         p0print(f"Av time: {averages[0]:.2f}s, Total time for {count} runs: {averages[0]*count:.2f}s")
         p0print(f"per-worker BW: {format(av_throughput/num_workers)}B/s,  per-process BW: {format(av_throughput)}B/s, global BW: {format(proc_count * av_throughput)}B/s")
@@ -252,7 +279,7 @@ def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_c
         latency=averages[0]*num_workers
         p0print(f"Est. latency to load the initial batch: {latency:.2f}s") 
         results[0]=averages[0]
-        results[1]=proc_count * av_throughput
+        results[1]=av_throughput
         
     return results
     
@@ -261,8 +288,7 @@ def get_bm_config(test="single-worker-bm"):
     
     config = {}
     config["test"]=test
-    config["res"] = "o1280"
-    config["graph_filename"] = "graphs/o1280.graph"
+    config["resolutions"] = ["o1280"]
     config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
     config["rollouts"] = [1]
     config["batch_sizes"]=[1]
@@ -276,6 +302,9 @@ def get_bm_config(test="single-worker-bm"):
     
     if test == "single-worker-bm":
         pass
+    elif test == "different-resolutions":
+        config["resolutions"] = ["o1280", "n320"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/home/mlx/ai-ml/datasets/stable/aifs-ea-an-oper-0001-mars-n320-1979-2022-6h-v4.zarr"]
     elif test == "rollout-bm":
         config["rollouts"] = [1,12]
     elif test == "multi-worker-bm":
@@ -286,36 +315,13 @@ def get_bm_config(test="single-worker-bm"):
     
     p0print(f"Running a benchmark with the config '{test}'")
     return config 
-
-def spawn_memory_monitor(config,count, r, bs, pf, nw, pm, rank, procs_per_node):
-    if rank == 0 and config["monitor_memory"]:
-        #generate a csv filename based on config
-        test=config["test"]
-        res=config["res"]
-        
-        os.makedirs(f"out/{test}", exist_ok=True)
-        filename=f"out/{test}/mem-usage-{res}-{count}loads-{r}r-{bs}bs-{pf}pf-{nw}nw-{pm}pm-{procs_per_node}ppn.csv"
-        #p = subprocess.run(["python " "memory_monitor.py " " False", " True ", filename])
-        #never does anything
-        p = mp.Process(target=run_mem_monitor, args=(False,True, filename))
-        p.start()
-        return p, filename
-    else:
-        return None, None
-    
-def terminate_memory_monitor(p, filename, test):
-    #TODO call a mem monitor internal function to close the file before terminating
-    if p is not None:
-        p.terminate()
-    if filename is not None:
-        plot_mem_monitor(filename,show_plot=False,outdir=f"out/{test}")
             
-        
 def manager():
     #TODO support looping over resolutions with different graphs and dataset lists
-    config = get_bm_config("single-worker-bm")
-    count=2
-    config["num_workers"]=[2]
+    #config = get_bm_config("single-worker-bm")
+    config = get_bm_config("different-resolutions")
+    count=1
+    config["num_workers"]=[1,2]
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
     
@@ -325,39 +331,46 @@ def manager():
     num_gpus_per_model=world_size #TODO allow a mix of data and model parallelism
     read_group_size=num_gpus_per_model
     
-    gi = setup_grid_indices(config["graph_filename"], read_group_size=read_group_size)
     
-    save_output=False
-    f = create_results_file(save_output) #could do this in __init__ if it was a class
-    
-    for dataset in config["datasets"]:
-        for r in config["rollouts"]:
-            ds = create_dataset(dataset, grid_indices=gi, rollout=r, num_nodes=num_nodes, num_gpus_per_node=num_gpus_per_node, num_gpus_per_model=num_gpus_per_model)
-            for bs in config["batch_sizes"]:
-                for pf in config["prefetch_factors"]:
-                    for nw in config["num_workers"]:
-                        for pm in config["pin_mem"]:
-                            
-                            if config["per_worker_count"]:
-                                base_count=count
-                                count=count*nw
-                            
-                            #TODO break these lines before run into a prelude function, could even make run a class with an __init__ and __del__
-                            dl_iter = iter(create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm))
-                            p0print(f"Proc {global_rank}: Starting {count} loads with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
-                            if save_output:
-                                mem_monitor_proc, csv = spawn_memory_monitor(config, count, r, bs, pf, nw, pm, global_rank, procs_per_node)
-                            
-                            results = run(dl_iter, nw, count=count, simulate_compute=False, proc_count=world_size)
-                            save_results(f, results, config, count, dataset, r, bs, pf, nw, pm, world_size, save_output=save_output)
-                            
-                            if save_output:
-                                terminate_memory_monitor(mem_monitor_proc, csv, config["test"])
-                            if config["per_worker_count"]:
-                                count=base_count
+    save_output=True
+    f = create_results_file(config,global_rank, save_output=save_output) #could do this in __init__ if it was a class
+   
+    for res in config["resolutions"]:
+        gi = setup_grid_indices(f"graphs/{res}.graph", read_group_size=read_group_size)
+        #filter the list of datasets to just the matching resolutions
+        datasets=[dataset for dataset in config["datasets"] if res in dataset]
+        for dataset in datasets:
+            for r in config["rollouts"]:
+                ds = create_dataset(dataset, grid_indices=gi, rollout=r, num_nodes=num_nodes, num_gpus_per_node=num_gpus_per_node, num_gpus_per_model=num_gpus_per_model)
+                for bs in config["batch_sizes"]:
+                    for pf in config["prefetch_factors"]:
+                        for nw in config["num_workers"]:
+                            for pm in config["pin_mem"]:
+                                
+                                if config["per_worker_count"]:
+                                    base_count=count
+                                    count=count*nw
+                                
+                                #TODO break these lines before run into a prelude function, could even make run a class with an __init__ and __del__
+                                p0print(f"Proc {global_rank}: Starting {count} loads with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
+                                if save_output and config["monitor_memory"]:
+                                    mem_monitor_proc, csv = spawn_memory_monitor(res, count, r, bs, pf, nw, pm, global_rank, procs_per_node)
+                                dl_iter = iter(create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm))
+                                
+                                try:
+                                    results = run(dl_iter, nw, count=count, simulate_compute=False, proc_count=world_size)
+                                    save_results(f, results, res, count, dataset, r, bs, pf, nw, pm, world_size, save_output=save_output)
+                                except MemoryError:
+                                    pass
+                                
+                                if save_output and config["monitor_memory"]:
+                                    terminate_memory_monitor(mem_monitor_proc, csv, config["test"])
+                                if config["per_worker_count"]:
+                                    count=base_count
                                 
     if save_output and f is not None:
         f.close()
+        plot_anemoi_dataloader_benchmark(f.name)
                                 
 
 if __name__ == "__main__":
