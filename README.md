@@ -11,11 +11,15 @@ You can run the code over multiple processes/nodes by launching with mpirun. Thi
 ```bash
 mpirun -np 4 python main.py
 ```
+By default, the memory monitor will run in the background for each benchmark, and plot will be produced under 'out/'.
 
-# Monitoring dataloader memory
-To monitor dataloader memory usage during the benchmark you can run the following on a different session on the same node
-```python
-python memory_monitor.py
-python plot.py #to plot the resulting csv file
+# Errors
+If you encounter this error:
 ```
-This will show a table of memory usage during the run, and will produce a csv file which can be plotted.
+  ompi_mpi_init: ompi_rte_init failed
+  --> Returned "No permission" (-17) instead of "Success" (0)
+```
+you can fix it with
+```bash
+export PMIX_MCA_gds=hash
+```

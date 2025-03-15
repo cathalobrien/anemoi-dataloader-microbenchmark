@@ -76,7 +76,7 @@ class MemoryMonitor():
       return ""
  
   def csv(self, filename=None):
-    #first call -> print headers
+    #first call -> create file and print headers
     if (self.csv_filename == None):
         if filename==None:
             raise ValueError("Error no filename provided in initial call to memoryMonitor.csv")
@@ -84,17 +84,17 @@ class MemoryMonitor():
         self.csv_filename = filename
         os.system(f"rm -f {self.csv_filename}")
         self.f = open(filename, "a")
-        header="time,pname,pid,uptime,rss,pss,uss,shared,shared_file,total_mem,used_mem\n"
+        header="time,pname,pid,uptime,rss,pss,uss,shared,shared_file,total_mem,used_mem,dl_used_mem\n"
         self.f.write(header)
     
     keys = list(list(self.data.values())[0].keys())
-    system_line=f"{self.now},system,,,,,,,,{self.mem.total},{self.mem.total-self.mem.available}\n"
+    system_line=f"{self.now},system,,,,,,,,{self.mem.total},{self.mem.total-self.mem.available},{self.rss_total_mem}\n"
     self.f.write(system_line)
     for pid, data in self.data.items():
         if not self.get_name(pid) == "memory_monitor":
             #mem_stats=tuple(self.format(data[k]) for k in keys if k !="uptime") #want raw numbers
             mem_stats=','.join([str(data[k]) for k in keys])
-            line=f"{self.now},{self.get_name(pid)},{str(pid)},{mem_stats},,\n"
+            line=f"{self.now},{self.get_name(pid)},{str(pid)},{mem_stats},,,\n"
             self.f.write(line)
             
     self.f.flush()
@@ -105,27 +105,34 @@ class MemoryMonitor():
     self._refresh()
     self.mem=psutil.virtual_memory()
     self.now = str(int(time.perf_counter() % 1e5))
+    #count total memory used by pytorch DL procs
+    #TODO not sure if it makes sense to sum up pss when running multi-gpu
+    #when i plot 4 procs with 6 workers each, once the pss sum is above the mem usage reported by psutil.
+    # => either summing pss across multiproc is wrong or its an issue of timing
+    # summing RSS looks better, but at one point it also crossed over used_mem
+    self.rss_total_mem=0
+    for pid, data in self.data.items():
+      if self.get_name(pid).startswith("pt_"):
+          self.rss_total_mem += data['rss']
+      
  
   def table(self) -> str:
     system_mem=f"Total system memory {self.format(self.mem.total)}, Memory availible {self.format(self.mem.available)} ({100 - self.mem.percent}%)\nSystem memory used, according to mlflow: {self.format(self.mem.used)}\n"
     table = []
     keys = list(list(self.data.values())[0].keys())
-    pss_total_mem=0
     for pid, data in self.data.items():
       #table.append((now, str(pid)) + tuple(self.format(data[k]) for k in keys))
       #table.append((now, uptime, self.get_name(pid), str(pid)) + tuple(self.format(data[k]) for k in keys))
       #uptime = datetime.datetime.fromtimestamp(data["uptime"]).strftime("%M:%S")
       #table.append((now, uptime, self.get_name(pid), str(pid)) + tuple(self.format(data[k]) for k in keys if k !="uptime"))
       table.append((self.now, self.get_name(pid), str(pid)) + tuple(self.format(data[k],key=k) for k in keys))
-      if self.get_name(pid).startswith("pt_"):
-          pss_total_mem += data['pss']
  
       #time  uptime    pname               PID  rss     pss     uss     shared    shared_file
       #------  --------  --------------  -------  ------  ------  ------  --------  -------------
        #99013  00:49     memory_monitor  1820491  311.9M  299.7M  293.2M  18.7M     18.7M
  
     #append total
-    total_memory=f"Total memory used by PyTorch (PSS sum): {self.format(pss_total_mem)}\n"
+    total_memory=f"Total memory used by PyTorch (PSS sum): {self.format(self.rss_total_mem)}\n"
     #return tabulate(table, headers=["time", "uptime", "pname","PID"] + keys) +  "\n" + total_memory + system_mem
     return tabulate(table, headers=["time", "pname","PID"] + keys) +  "\n" + total_memory + system_mem
  

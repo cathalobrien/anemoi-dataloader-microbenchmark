@@ -231,6 +231,7 @@ def get_bm_config(test="single-worker-bm"):
     config["prefetch_factors"]=[1]
     config["pin_mem"]=[True]
     config["per_worker_count"]=True #if true, multiples count by nw
+    config["monitor_memory"]=True
     
     tests=["single-worker-bm", "rollout-bm", "multi-worker-bm"]
     
@@ -247,9 +248,12 @@ def get_bm_config(test="single-worker-bm"):
     p0print(f"Running a benchmark with the config '{test}'")
     return config 
 
-def spawn_memory_monitor(test,count, res, r, bs, pf, nw, pm, rank, procs_per_node):
-    if rank == 0:
+def spawn_memory_monitor(config,count, r, bs, pf, nw, pm, rank, procs_per_node):
+    if rank == 0 and config["monitor_memory"]:
         #generate a csv filename based on config
+        test=config["test"]
+        res=config["res"]
+        
         os.makedirs(f"out/{test}", exist_ok=True)
         filename=f"out/{test}/mem-usage-{res}-{count}loads-{r}r-{bs}bs-{pf}pf-{nw}nw-{pm}pm-{procs_per_node}ppn.csv"
         #p = subprocess.run(["python " "memory_monitor.py " " False", " True ", filename])
@@ -271,7 +275,7 @@ def terminate_memory_monitor(p, filename, test):
 def manager():
     #TODO support looping over resolutions with different graphs and dataset lists
     config = get_bm_config("single-worker-bm")
-    count=2
+    count=10
     config["num_workers"]=[6]
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
@@ -299,7 +303,7 @@ def manager():
                             #TODO break these lines before run into a prelude function, could even make run a class with an __init__ and __del__
                             dl_iter = iter(create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm))
                             p0print(f"Proc {global_rank}: Starting {count} runs with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
-                            mem_monitor_proc, csv = spawn_memory_monitor(config["test"], count, config["res"], r, bs, pf, nw, pm, global_rank, procs_per_node)
+                            mem_monitor_proc, csv = spawn_memory_monitor(config, count, r, bs, pf, nw, pm, global_rank, procs_per_node)
                             
                             run(dl_iter, count=count, simulate_compute=False, proc_count=world_size)
                             
@@ -315,6 +319,7 @@ if __name__ == "__main__":
         
 #TODO   add gpu support
 #       measure time spent in HtoD copies
-#       Incorporate memory monitor, launch it before and rename csv output
 #       Split the 'anemoi' and benchmarking code into different files
+#       plot av global throughput across various tests as a bar chart
+#       Sync metrics across all procs, and measure min, max, variance etc
 
