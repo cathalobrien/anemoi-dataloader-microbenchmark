@@ -20,6 +20,7 @@ from pathlib import Path
 from torch_geometric.data import HeteroData
 import multiprocessing as mp
 import argparse
+import math
 
 from memory_monitor import run_mem_monitor
 from plot import plot_mem_monitor, plot_anemoi_dataloader_benchmark
@@ -118,23 +119,32 @@ def load_batch(dl_iter, verbose=True):
             p0print(f"p0: dataloader throughput: {format(throughput)}B/s")
     return batch, elapsed
 
-def simulate_iter(rollout=1):
-    throughput=0.2
-    sleep_time=1/(throughput/rollout)
-    p0print(f"Simulating an iter with {throughput=} and {rollout=}, sleeping for {sleep_time:.2f}s")
+def simulate_iter(rollout=1, single_step_throughput=0.2, sleep_time=0):
+    if (sleep_time == 0):
+        #TODO is the cost of r=2 2xr=1? the #batches only goes from 3 to 4
+        
+        sleep_time=1/(single_step_throughput/rollout)
+        p0print(f"Simulating an iter with {single_step_throughput=} and {rollout=}, sleeping for {sleep_time:.2f}s")
+    else:
+        p0print(f"Simulating a {sleep_time:.2f}s iter")
     time.sleep(sleep_time)
 
 def setup_grid_indices(graph_filename, read_group_size=1):
+    if not os.path.isfile(graph_filename):
+        raise ValueError(f"Error! '{graph_filename}' not found")
     p0print(f"Loading the graph '{graph_filename}' (read group size: {read_group_size})...")
+    start_time=time.time()
+    #TODO talk to mario
     grid_indices = FullGrid("data", read_group_size)
     grid_indices.setup(graph_data(graph_filename=graph_filename))
-    p0print("Graph loaded.")
+    p0print(f"Graph loaded in {time.time() - start_time:.2f}s.")
     return grid_indices
 
 
 def create_dataset(dataset, grid_indices, rollout=1, num_nodes=1, num_gpus_per_node=1, num_gpus_per_model=1):
     r=rollout
     p0print(f"Opening the dataset '{dataset}' (rollout {r}, {int(num_nodes)} nodes with {num_gpus_per_node} 'GPUs' per node, model split over {num_gpus_per_model} 'GPUs')...")
+    start_time=time.time()
     ds = _get_dataset(
                 #open_dataset(self.config.model_dump().dataloader.training),
                 open_dataset(dataset=dataset, start=None, end=202312, frequency=frequency, drop=[]),
@@ -146,12 +156,13 @@ def create_dataset(dataset, grid_indices, rollout=1, num_nodes=1, num_gpus_per_n
                 num_gpus_per_node=num_gpus_per_node,
                 num_gpus_per_model=num_gpus_per_model,
             )
-    p0print("Dataset opened.")
+    p0print(f"Dataset opened in {time.time() - start_time:.2f}s.")
     return ds
 
 def create_dataloader(ds, b=1, w=1, pf=1, pin_mem=True):
     seed=int(time.time())
     os.environ["ANEMOI_BASE_SEED"] = str(seed)
+    start_time=time.time()
     p0print(f"Creating Dataloader (batch size: {b}, num_workers: {w}, prefetch_factor {pf}, {pin_mem=}, {seed=})...")
     dataloader = DataLoader(
             ds,
@@ -164,8 +175,12 @@ def create_dataloader(ds, b=1, w=1, pf=1, pin_mem=True):
             prefetch_factor=pf, #self.config.dataloader.prefetch_factor,
             persistent_workers=True,
     )
-    p0print("Dataloader created.")
-    return dataloader
+    p0print(f"Dataloader created in {time.time() - start_time:.2f}s.")
+    p0print("Creating Iterator")
+    start_time=time.time()
+    dl_iter=iter(dataloader)
+    p0print(f"Iterator created in {time.time() - start_time:.2f}s.")
+    return dl_iter
 
 def clear_page_cache():
     p0print("Clearing the page cache...")
@@ -183,8 +198,8 @@ def get_parallel_info():
         world_size = 1
 
     #TODO change to MPI4PY, this is not portable
-    local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", 0))  # Rank within a node, between 0 and num_gpus
-    procs_per_node = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_SIZE", 1)) #number of processes on the current node
+    local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", int(os.environ.get("SLURM_LOCALID", 0))))  # Rank within a node, between 0 and num_gpus
+    procs_per_node = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_SIZE", int(os.environ.get("SLURM_TASKS_PER_NODE", 1).split('(')[0]))) #number of processes on the current node
     num_nodes= world_size/procs_per_node
     p0print(f"Running in parallel across {world_size} processes over {int(num_nodes)} nodes")
 
@@ -195,11 +210,11 @@ def p0print(str):
     if MPI4PY_AVAILABLE and comm.Get_rank() == 0:
         print(str)
 
-def spawn_memory_monitor(res,count, r, bs, pf, nw, pm, rank, procs_per_node):
+def spawn_memory_monitor(test,res, dataset_index,count, r, bs, pf, nw, pm, rank, num_nodes, procs_per_node):
     if rank == 0:
         #generate a csv filename based on config
-        setup=f"mem-usage-{res}-{count}loads-{r}r-{bs}bs-{pf}pf-{nw}nw-{pm}pm-{procs_per_node}ppn" 
-        dir=f"out/{setup}"
+        setup=f"mem-usage-{res}-ds{dataset_index}-{count}loads-{r}r-{bs}bs-{pf}pf-{nw}nw-{pm}pm-{int(num_nodes)}N-{procs_per_node}ppn" 
+        dir=f"out/{test}/{setup}"
         os.makedirs(dir, exist_ok=True)
         filename=f"{dir}/{setup}.csv"
         #p = subprocess.run(["python " "memory_monitor.py " " False", " True ", filename])
@@ -215,7 +230,7 @@ def terminate_memory_monitor(p, filename, test):
     if p is not None:
         p.terminate()
     if filename is not None:
-        plot_mem_monitor(filename,show_plot=False,outdir=os.path.dirname(filename))
+        plot_mem_monitor(filename,show_plot=False,outdir=os.path.dirname(filename),filename_prefix=test)
 
 def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.csv",save_output=True):
     if save_output and rank==0:
@@ -245,7 +260,7 @@ def save_results(f, results, res, count, ds, r, bs, pf, nw, pm, num_procs, save_
 
 #TODO distinguish between per node and multinode throughput
 #TODO gather metrics from all procs, rather then naively extrapolating from p0
-def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_count=1):
+def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_count=1, rollout=1, sleep_time=0):
     #clear_page_cache() #permission denied on Atos
 
     #each process maintains a list of their times to load
@@ -261,7 +276,7 @@ def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_c
             size = batch.element_size() * batch.nelement()
             
         if simulate_compute:
-            simulate_iter()
+            simulate_iter(rollout=rollout, sleep_time=sleep_time)
         #the following code syncs time across all procs and gets the average
    #if comm.Get_rank() == 0:
         
@@ -300,7 +315,7 @@ def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_c
         #p0print(f"Av BW per worker = {format(av_throughput)}B/s, input batch size = {format(averages[1])}B => compute throughput should be >= {1.0/averages[0]:.3f}it/s to avoid starvation")
         
         #Is this fair since I'm loading batches one after another with no compute simulated in between?
-        p0print(f"Compute throughput must be >= {1.0/mean_time_per_process:.3f}it/s ({format(av_throughput_per_process)}B/s / {format(size)}B) to avoid starvation")
+        p0print(f"Estimated throughput upper-bound: {1.0/mean_time_per_process:.3f}it/s ({format(av_throughput_per_process)}B/s / {format(size)}B)")
         latency=mean_time_per_worker
         p0print(f"Est. latency to load the initial batch: {latency:.2f}s") 
         return [mean_time_per_process, av_throughput_per_process]
@@ -322,18 +337,28 @@ def get_bm_config(test="single-worker-bm"):
     config["per_worker_count"]=True #if true, multiples count by nw
     config["monitor_memory"]=True
     
-    tests=["single-worker-bm", "rollout-bm", "multi-worker-bm"]
+    tests=["single-worker-bm", "rollout-bm", "multi-worker-bm", "4.4km", "compression"]
     
     if test == "single-worker-bm":
         pass
     elif test == "different-resolutions":
         config["resolutions"] = ["o1280", "n320"]
         config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/home/mlx/ai-ml/datasets/stable/aifs-ea-an-oper-0001-mars-n320-1979-2022-6h-v4.zarr"]
+    elif test == "4.4km":
+        config["resolutions"] = ["o2560"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr"]
+    elif test == "compression":
+        config["resolutions"] = ["n320"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-n320-2016-2023-6h-v8.zarr", "/lus/h2resw01/scratch/mafp/public/cathal/aifs-od-an-oper-0001-mars-n320-2016-2023-6h-v8-with-no-compression.zarr"]
+        config["rollouts"] = [12, 120] #large rollout to get large n320 batches
     elif test == "rollout-bm":
         config["rollouts"] = [1,12]
     elif test == "multi-worker-bm":
         config["num_workers"] = [1,2,4,8]
         config["per_worker_count"]=True
+    elif test == "zarr-chunked-by-grid-dim":
+        config["resolutions"] = ["o2560"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr", "/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v3-1week.zarr"]
     else:
         raise ValueError(f"Error. invalid benchmark. Please select one of '{tests}'")
     
@@ -347,11 +372,13 @@ def manager():
     args = parser.parse_args()
     
     #TODO support looping over resolutions with different graphs and dataset lists
-    config = get_bm_config("single-worker-bm")
-    #config = get_bm_config("different-resolutions")
-    count=4
-    config["num_workers"]=[4]
-    config["prefetch_factors"]=[2]
+    #config = get_bm_config("single-worker-bm")
+    #config = get_bm_config("4.4km")
+    config = get_bm_config("zarr-chunked-by-grid-dim")
+    count=10
+    config["num_workers"]=[1]
+    config["prefetch_factors"]=[1]
+    config["rollouts"] = [1]
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
     
@@ -367,19 +394,14 @@ def manager():
     else:
         read_group_size=num_gpus_per_model
     #check for invalid inputs
-    if read_group_size > num_gpus_per_model:
-        raise ValueError(f"Error! Read group size ({read_group_size}) can't be bigger than model group size ({num_gpus_per_model})")
-    if num_gpus_per_model > world_size:
-        raise ValueError(f"Error! Model group size ({num_gpus_per_model}) can't be bigger than the total number of GPUs ({world_size})")
-    if read_group_size > world_size:
-        raise ValueError(f"Error! Read group size ({read_group_size}) can't be bigger than the total number of GPUs ({world_size})")
-    if num_gpus_per_model % 2 != 0:
-        raise ValueError(f"Error! Model group size ({num_gpus_per_model}) must be a power of 2")
-    if num_gpus_per_model % read_group_size != 0:
-        raise ValueError(f"Error! read group size ({read_group_size}) must divide evenly into model group size ({num_gpus_per_model})")
+    if num_gpus_per_model < 1 or num_gpus_per_model > world_size or (not math.log2(num_gpus_per_model).is_integer()) :
+        raise ValueError(f"Error! Model group size ({num_gpus_per_model}) must be a power of 2 between 1 and 'world-size' ({world_size}) ")
+    if read_group_size < 1 or read_group_size > num_gpus_per_model or num_gpus_per_model % read_group_size != 0:
+        raise ValueError(f"Error! read group size ({read_group_size}) must be a number between 1 and 'model-size' ({num_gpus_per_model}) which divides evenly into 'model-size'")
     
     
-    save_output=False
+    save_output=True
+    dir=f"out/{config['test']}"
     f = create_results_file(config,global_rank, save_output=save_output) #could do this in __init__ if it was a class
    
     for res in config["resolutions"]:
@@ -401,13 +423,14 @@ def manager():
                                 #TODO break these lines before run into a prelude function, could even make run a class with an __init__ and __del__
                                 p0print(f"Proc {global_rank}: Starting {count} loads with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
                                 if save_output and config["monitor_memory"]:
-                                    mem_monitor_proc, csv = spawn_memory_monitor(res, count, r, bs, pf, nw, pm, global_rank, procs_per_node)
-                                dl_iter = iter(create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm))
+                                    mem_monitor_proc, csv = spawn_memory_monitor(config["test"],res, datasets.index(dataset), count, r, bs, pf, nw, pm, global_rank, num_nodes, procs_per_node)
+                                dl_iter = create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm)
                                 
                                 try:
-                                    results = run(dl_iter, nw, count=count, simulate_compute=False, proc_count=world_size)
+                                    results = run(dl_iter, nw, count=count, simulate_compute=False, proc_count=world_size, rollout=r, sleep_time=25)
                                     save_results(f, results, res, count, dataset, r, bs, pf, nw, pm, world_size, save_output=save_output)
                                 except MemoryError:
+                                    print("!!!OUT OF MEMORY!!!")
                                     pass
                                 
                                 if save_output and config["monitor_memory"]:
@@ -417,7 +440,10 @@ def manager():
                                 
     if save_output and f is not None:
         f.close()
-        plot_anemoi_dataloader_benchmark(f.name)
+        try:
+            plot_anemoi_dataloader_benchmark(f.name, outdir=dir, outname=f"{config['test']}-j{os.environ.get('SLURM_JOBID','0')}-{int(time.time())}")
+        except ValueError as err:
+            p0print(f"Error plotting: {err}")
                                 
 
 if __name__ == "__main__":
@@ -430,6 +456,10 @@ if __name__ == "__main__":
 #       Split the 'anemoi' and benchmarking code into different files
 #       Gather time spent at barrier for each proc and analyse them, maybe there's some repeast offenders
 #       distinguish between per node and global throughput (think atos node has 480MB/s max BW)
+#       Add code which complains if graphs arent in 'graphs/'
+#       Confirm that the graph i use does not impact performance
+#       Understand why the pytorch insufficient cpu core message pops up even when my job has enough cores
+#       Add requirements.txt
 
 
 #Pre-reqs for a scaling run

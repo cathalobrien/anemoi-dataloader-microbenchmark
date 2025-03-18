@@ -20,13 +20,11 @@ def generate_config_strings(varying_values):
     
     return config_strings
 
-def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out"):
+def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out", outname="out"):
         file=csv
         filename=os.path.basename(file)
         #print(f"Loading {file}")
         df=pd.read_csv(file)
-        print(df.head())
-        
         #issue where if you vary res you have a different res and dataset, so have to fuse them bc its really 1 change
         #also dataset paths are too large to plot
         # so replace res and dataset with "res-datasetID", and make a lookup table for the ids if we want to print the path later
@@ -45,7 +43,7 @@ def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out"):
 
         # Extract relevant columns
         x = configs
-        y = grouped["proc-throughput(byte/s)"]
+        y = grouped["proc-throughput(byte/s)"] / 1024 / 1024
 
         # Plot the bar chart
         plt.figure(figsize=(8, 5))
@@ -55,18 +53,20 @@ def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out"):
         # Labels and title
         plt.xlabel("Config")
         plt.ylabel("Throughput (MB/s)")
-        plt.title("Throughput per dataloader")
+        plt.title("Throughput per 'GPU'")
         #plt.grid() #goes on top
 
         # Show the plot
-        plt.savefig("out.png")
+        plt.savefig(f"{outdir}/{outname}.png")
         plt.show()
         
 #plot_anemoi_dataloader_benchmark("out/anemoi-dataloader-microbenchmark.csv")
 
-def plot_mem_monitor(csv, show_plot=True, outdir="out"):
+def plot_mem_monitor(csv, show_plot=True, outdir="out", filename_prefix=""):
         file=csv
         filename=os.path.basename(file)
+        if filename_prefix != "":
+                filename=f"{filename_prefix}-{filename}"
         df=pd.read_csv(file)
         df["pname-pid"] = df["pname"] + "-" + df["pid"].astype(str)
         start_time=df["time"][0]
