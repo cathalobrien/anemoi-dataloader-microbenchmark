@@ -1,0 +1,24 @@
+#gcc 12.2.0 ompi darshan
+#module load prgenv/gnu gcc/12.2.0 openmpi/4.1.1.1
+#export LIBDARSHAN=/etc/ecmwf/nfs/dh1_home_a/naco/libs_built_from_source/darshan/darshan-3.4.5/gnu-12.2.0-ompi4.1.1.1-install/lib/libdarshan.so
+
+#gcc 8.5.0 ompi darshan
+export LIBDARSHAN=/etc/ecmwf/nfs/dh1_home_a/naco/libs_built_from_source/darshan/darshan-3.4.5/gcc-8.5.0-ompi4.1.1.1-install/lib/libdarshan.so
+
+#gcc 13.2.0 ompi darshan
+#module load prgenv/gnu gcc/13.2.0 openmpi/4.1.1.1
+#export LIBDARSHAN=/etc/ecmwf/nfs/dh1_home_a/naco/libs_built_from_source/darshan/darshan-3.4.5/gcc-13.2.0-ompi4.1.1.1-install/lib/libdarshan.so
+
+#intel HPCX darshan 
+#module load prgenv/intel intel/2021.4.0 hpcx-openmpi/2.9.0
+#export LD_LIBRARY_PATH=/usr/local/apps/intel/2021.4.0/compiler/latest/linux/compiler/lib/intel64:$LD_LIBRARY_PATH
+#export LIBDARSHAN=/home/naco/libs_built_from_source/darshan/darshan-3.4.5/install/lib/libdarshan.so
+
+export DARSHAN_EXCLUDE_DIRS=$VIRTUAL_ENV,$HPCPERM
+export DARSHAN_LOG_PATH=/ec/res4/scratch/naco/aifs/darshan/anemoi-dataloader-benchmark
+mkdir -p $DARSHAN_LOG_PATH
+unset DARSHAN_ENABLE_NONMPI #we call MPI_init/finalize via MPI4PY
+export DARSHAN_CONFIG_PATH=/ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark/darshan/darshan.config
+echo "Enabling Darshan with '$LIBDARSHAN' on process '$$'. Logs will be written to '$DARSHAN_LOG_PATH'. Darshan will be configured by '$DARSHAN_CONFIG_PATH', and the following additional dirs will be ignored: '$DARSHAN_EXCLUDE_DIRS'"
+
+export LD_PRELOAD=$LIBDARSHAN

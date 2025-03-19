@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=aifs-dataloader-bm
 #SBATCH --qos=np
-#SBATCH -N 16
+#SBATCH -N 4
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=0
@@ -12,4 +12,5 @@
 cd /ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark
 source env.sh
 
-srun python main.py -r 16
+#srun --export=ALL,LD_PRELOAD=$LIBDARSHAN  #to run with darshan
+srun python main.py

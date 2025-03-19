@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from anemoi.datasets.data import open_dataset
 from anemoi.models.data_indices.collection import IndexCollection
 from anemoi.training.data.dataset import NativeGridDataset
-from anemoi.training.data.dataset import worker_init_func
+from anemoi.training.data.dataset import worker_init_func as default_worker_init_func
 from anemoi.training.data.grid_indices import BaseGridIndices, FullGrid
 from anemoi.utils.dates import frequency_to_seconds
 
@@ -129,15 +129,41 @@ def simulate_iter(rollout=1, single_step_throughput=0.2, sleep_time=0):
         p0print(f"Simulating a {sleep_time:.2f}s iter")
     time.sleep(sleep_time)
 
-def setup_grid_indices(graph_filename, read_group_size=1):
-    if not os.path.isfile(graph_filename):
-        raise ValueError(f"Error! '{graph_filename}' not found")
-    p0print(f"Loading the graph '{graph_filename}' (read group size: {read_group_size})...")
+#you can check these by editing anemoi/training/data/grid_indices.py and editing compute_grid_sizes to print 'graph[self.nodes_name].num_nodes'
+def get_grid_points(res):
+    if res == "o2560":
+        return 26306560
+    elif res == "o1280":
+        return 6599680
+    elif res == "n320":
+        return 542080
+    else:
+        return 0
+
+#This file calculates the number of grid points for each reader in read group
+#A graph filename is optional
+#I have hardcoded the number of grid points for some common resolutions
+#If your resolution is not hardcoded, you can provide a graph and the grid points will be read from there
+#def setup_grid_indices(res, graph_filename=None, read_group_size=1):
+def setup_grid_indices(res, graph_filename=None, read_group_size=1):
     start_time=time.time()
-    #TODO talk to mario
     grid_indices = FullGrid("data", read_group_size)
-    grid_indices.setup(graph_data(graph_filename=graph_filename))
-    p0print(f"Graph loaded in {time.time() - start_time:.2f}s.")
+    #if a graph path is given, load it
+    if graph_filename is not None:
+        if not os.path.isfile(graph_filename):
+            raise ValueError(f"Error! '{graph_filename}' not found")
+        p0print(f"Loading the graph '{graph_filename}' (read group size: {read_group_size})...")
+        grid_indices.setup(graph_data(graph_filename=graph_filename))
+        p0print(f"Graph loaded in {time.time() - start_time:.2f}s.")
+    else:
+        grid_points=get_grid_points(res)
+        if grid_points == 0:
+            raise ValueError(f"Warning! res '{res}' has an unknown number of grid points. Please rerun and pass a graph path as 'graph_filename'")
+        p0print(f"Running an '{res}' configuration with {grid_points} points globally (read group size: {read_group_size})")
+        #instead of calling FullGrid.setup() set the grid_size manually
+        #IF FullGrid.setup() changes or if a different Grid type is used, this will break
+        grid_indices.grid_size=grid_points
+            
     return grid_indices
 
 
@@ -159,7 +185,7 @@ def create_dataset(dataset, grid_indices, rollout=1, num_nodes=1, num_gpus_per_n
     p0print(f"Dataset opened in {time.time() - start_time:.2f}s.")
     return ds
 
-def create_dataloader(ds, b=1, w=1, pf=1, pin_mem=True):
+def create_dataloader(ds, b=1, w=1, pf=1, pin_mem=True, worker_init_func=default_worker_init_func):
     seed=int(time.time())
     os.environ["ANEMOI_BASE_SEED"] = str(seed)
     start_time=time.time()
@@ -175,11 +201,8 @@ def create_dataloader(ds, b=1, w=1, pf=1, pin_mem=True):
             prefetch_factor=pf, #self.config.dataloader.prefetch_factor,
             persistent_workers=True,
     )
-    p0print(f"Dataloader created in {time.time() - start_time:.2f}s.")
-    p0print("Creating Iterator")
-    start_time=time.time()
     dl_iter=iter(dataloader)
-    p0print(f"Iterator created in {time.time() - start_time:.2f}s.")
+    p0print(f"Dataloader created in {time.time() - start_time:.2f}s.")
     return dl_iter
 
 def clear_page_cache():
@@ -199,7 +222,7 @@ def get_parallel_info():
 
     #TODO change to MPI4PY, this is not portable
     local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", int(os.environ.get("SLURM_LOCALID", 0))))  # Rank within a node, between 0 and num_gpus
-    procs_per_node = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_SIZE", int(os.environ.get("SLURM_TASKS_PER_NODE", 1).split('(')[0]))) #number of processes on the current node
+    procs_per_node = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_SIZE", int(os.environ.get("SLURM_TASKS_PER_NODE", '1').split('(')[0]))) #number of processes on the current node
     num_nodes= world_size/procs_per_node
     p0print(f"Running in parallel across {world_size} processes over {int(num_nodes)} nodes")
 
@@ -247,7 +270,28 @@ def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.
         return f
     else:
         return None
-        
+    
+    #wrapper to worker_init_func which enables darshan on the dataloader processes
+    #It calls 'anemoi-dataloader-microbenchmark/darshan/enable-darshan' which sets the relevant env vars
+def worker_init_func_w_darshan(worker_id: int):
+    #os.system("./darshan/enable-darshan") #TODO replace with relative path
+    os.system("/ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark/darshan/enable-darshan")
+    default_worker_init_func(worker_id=worker_id)
+    
+def enable_darshan(log_path):
+    #only works on Atos
+    os.makedirs(log_path, exist_ok=True)
+    p0print(f"Enabling Darshan. Darshan logs will be written to '{log_path}'.")
+
+    #TODO rebuild with gnu to remove this intel compiler dependancy
+    org_ld_library_path=os.environ.get("LD_LIBRARY_PATH", "")
+    os.environ["LD_LIBRARY_PATH"] = f"/usr/local/apps/intel/2021.4.0/compiler/latest/linux/compiler/lib/intel64:{org_ld_library_path}"
+
+    org_ld_preload=os.environ.get("LD_PRELOAD", "")
+    os.environ["LD_PRELOAD"] = f"/home/naco/libs_built_from_source/darshan/darshan-3.4.5/install/lib/libdarshan.so:{org_ld_preload}"
+    os.environ["DARSHAN_EXCLUDE_DIRS"] = os.environ.get("VIRTUAL_ENV") #dont log loading the python libs into memory
+    os.environ["DARSHAN_LOG_PATH"]=log_path
+    #DARSHAN_ENABLE_NONMPI=1  
         
 def save_results(f, results, res, count, ds, r, bs, pf, nw, pm, num_procs, save_output=True):
     #header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),throughput(byte/s)\n"
@@ -336,13 +380,15 @@ def get_bm_config(test="single-worker-bm"):
     config["pin_mem"]=[True]
     config["per_worker_count"]=True #if true, multiples count by nw
     config["monitor_memory"]=True
+    config["use_darshan"]=True
     
     tests=["single-worker-bm", "rollout-bm", "multi-worker-bm", "4.4km", "compression"]
     
     if test == "single-worker-bm":
         pass
     elif test == "different-resolutions":
-        config["resolutions"] = ["o1280", "n320"]
+        #config["resolutions"] = ["o1280", "n320"]
+        config["resolutions"] = ["n320", "o1280"]
         config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/home/mlx/ai-ml/datasets/stable/aifs-ea-an-oper-0001-mars-n320-1979-2022-6h-v4.zarr"]
     elif test == "4.4km":
         config["resolutions"] = ["o2560"]
@@ -372,13 +418,17 @@ def manager():
     args = parser.parse_args()
     
     #TODO support looping over resolutions with different graphs and dataset lists
-    #config = get_bm_config("single-worker-bm")
+    config = get_bm_config("single-worker-bm")
+    #config = get_bm_config("different-resolutions")
     #config = get_bm_config("4.4km")
-    config = get_bm_config("zarr-chunked-by-grid-dim")
-    count=10
+    #config = get_bm_config("zarr-chunked-by-grid-dim")
+    config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr"]
+    config["resolutions"] =["o2560"]
+    count=2
     config["num_workers"]=[1]
     config["prefetch_factors"]=[1]
     config["rollouts"] = [1]
+    config["test"]="debug"
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2016-2023-6h-v1.zarr"]
     
@@ -400,12 +450,16 @@ def manager():
         raise ValueError(f"Error! read group size ({read_group_size}) must be a number between 1 and 'model-size' ({num_gpus_per_model}) which divides evenly into 'model-size'")
     
     
-    save_output=True
+    save_output=False
     dir=f"out/{config['test']}"
     f = create_results_file(config,global_rank, save_output=save_output) #could do this in __init__ if it was a class
+
+    worker_init_func=default_worker_init_func
+    if config["use_darshan"]:
+        worker_init_func=worker_init_func_w_darshan
    
     for res in config["resolutions"]:
-        gi = setup_grid_indices(f"graphs/{res}.graph", read_group_size=read_group_size)
+        gi = setup_grid_indices(res, read_group_size=read_group_size)
         #filter the list of datasets to just the matching resolutions
         datasets=[dataset for dataset in config["datasets"] if res in dataset]
         for dataset in datasets:
@@ -424,7 +478,7 @@ def manager():
                                 p0print(f"Proc {global_rank}: Starting {count} loads with {r=}, {bs=}, {pf=}, {nw=}, {pm=}")
                                 if save_output and config["monitor_memory"]:
                                     mem_monitor_proc, csv = spawn_memory_monitor(config["test"],res, datasets.index(dataset), count, r, bs, pf, nw, pm, global_rank, num_nodes, procs_per_node)
-                                dl_iter = create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm)
+                                dl_iter = create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm, worker_init_func=worker_init_func)
                                 
                                 try:
                                     results = run(dl_iter, nw, count=count, simulate_compute=False, proc_count=world_size, rollout=r, sleep_time=25)
