@@ -3,7 +3,9 @@
 #export LIBDARSHAN=/etc/ecmwf/nfs/dh1_home_a/naco/libs_built_from_source/darshan/darshan-3.4.5/gnu-12.2.0-ompi4.1.1.1-install/lib/libdarshan.so
 
 #gcc 8.5.0 ompi darshan
-export LIBDARSHAN=/etc/ecmwf/nfs/dh1_home_a/naco/libs_built_from_source/darshan/darshan-3.4.5/gcc-8.5.0-ompi4.1.1.1-install/lib/libdarshan.so
+#export LIBDARSHAN=/etc/ecmwf/nfs/dh1_home_a/naco/libs_built_from_source/darshan/darshan-3.4.5/gcc-8.5.0-ompi4.1.1.1-install/lib/libdarshan.so
+#below is darshan 3.4.6 with no mmap support
+export LIBDARSHAN=/etc/ecmwf/nfs/dh1_home_a/naco/libs_built_from_source/darshan/darshan-3.4.6/gcc8.5.0-ompi4.1.1.1-install/lib/libdarshan.so
 
 #gcc 13.2.0 ompi darshan
 #module load prgenv/gnu gcc/13.2.0 openmpi/4.1.1.1
@@ -16,9 +18,20 @@ export LIBDARSHAN=/etc/ecmwf/nfs/dh1_home_a/naco/libs_built_from_source/darshan/
 
 export DARSHAN_EXCLUDE_DIRS=$VIRTUAL_ENV,$HPCPERM
 export DARSHAN_LOG_PATH=/ec/res4/scratch/naco/aifs/darshan/anemoi-dataloader-benchmark
+#export DARSHAN_MMAP_LOGPATH=$TMPDIR/darshan
+#mkdir -p $DARSHAN_MMAP_LOGPATH
 mkdir -p $DARSHAN_LOG_PATH
+
+#If profiling the main process you have to unset DARSHAN_ENABLE_NONMPI as MPI_init/finalize is called via MPI4PY
 unset DARSHAN_ENABLE_NONMPI #we call MPI_init/finalize via MPI4PY
+#If profiling the dataloader tasks, you have to set this since thye do NOT call MPI_finalize
+#export DARSHAN_ENABLE_NONMPI=1 #we call MPI_init/finalize via MPI4PY
+#works with DARSHAN_ENABLE_NONMPI if i dont import MPI4PY
+
+#export DARSHAN_DISABLE=1 #Confusing, but we have to set LD_PRELOAD before launching the main proc. but we dont want to profile it, so we disable it and then renable it right before spawning the subprocs
 export DARSHAN_CONFIG_PATH=/ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark/darshan/darshan.config
-echo "Enabling Darshan with '$LIBDARSHAN' on process '$$'. Logs will be written to '$DARSHAN_LOG_PATH'. Darshan will be configured by '$DARSHAN_CONFIG_PATH', and the following additional dirs will be ignored: '$DARSHAN_EXCLUDE_DIRS'"
+
+#To debug, uncomment this line. It prints once on every dataloader process so quite a lot of spam
+#echo "Enabling Darshan with '$LIBDARSHAN' on process '$$'. Logs will be written to '$DARSHAN_LOG_PATH'. Darshan will be configured by '$DARSHAN_CONFIG_PATH', and the following additional dirs will be ignored: '$DARSHAN_EXCLUDE_DIRS'. DARSHAN_ENABLE_NONMPI=$DARSHAN_ENABLE_NONMPI"
 
 export LD_PRELOAD=$LIBDARSHAN

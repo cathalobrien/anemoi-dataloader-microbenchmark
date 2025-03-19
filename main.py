@@ -25,13 +25,17 @@ import math
 from memory_monitor import run_mem_monitor
 from plot import plot_mem_monitor, plot_anemoi_dataloader_benchmark
 
-try:
-    from mpi4py import MPI
-except ImportError:
-    MPI4PY_AVAILABLE=False
+USE_MPI=True #If you want to disable MPI while having it installed
+if USE_MPI:
+    try:
+        from mpi4py import MPI
+    except ImportError:
+        MPI4PY_AVAILABLE=False
+    else:
+        MPI4PY_AVAILABLE=True
+        comm = MPI.COMM_WORLD
 else:
-    MPI4PY_AVAILABLE=True
-    comm = MPI.COMM_WORLD
+    MPI4PY_AVAILABLE=False
 
 training_batch_size=1
 multistep_input=2
@@ -159,7 +163,7 @@ def setup_grid_indices(res, graph_filename=None, read_group_size=1):
         grid_points=get_grid_points(res)
         if grid_points == 0:
             raise ValueError(f"Warning! res '{res}' has an unknown number of grid points. Please rerun and pass a graph path as 'graph_filename'")
-        p0print(f"Running an '{res}' configuration with {grid_points} points globally (read group size: {read_group_size})")
+        p0print(f"Running '{res}' resolution with {grid_points} points globally (read group size: {read_group_size})")
         #instead of calling FullGrid.setup() set the grid_size manually
         #IF FullGrid.setup() changes or if a different Grid type is used, this will break
         grid_indices.grid_size=grid_points
@@ -190,18 +194,32 @@ def create_dataloader(ds, b=1, w=1, pf=1, pin_mem=True, worker_init_func=default
     os.environ["ANEMOI_BASE_SEED"] = str(seed)
     start_time=time.time()
     p0print(f"Creating Dataloader (batch size: {b}, num_workers: {w}, prefetch_factor {pf}, {pin_mem=}, {seed=})...")
+    #TODO only need to set this once per dataload
+    #could ignore the mem monitor process
+    #os.system("source /ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark/darshan/enable-darshan")
+    #os.system("export PMIX_MCA_gds=hash") #needed to when creatin procs via
+    #os.environ["LD_PRELOAD"]="/etc/ecmwf/nfs/dh1_home_a/naco/libs_built_from_source/darshan/darshan-3.4.5/gcc-8.5.0-ompi4.1.1.1-install/lib/libdarshan.so"
+    #os.environ["DARSHAN_ENABLE_NONMPI"]=1
+    #if os.environ.get('DARSHAN_DISABLE', 'unset') != "unset":
+    #    del os.environ["DARSHAN_DISABLE"] #unset "DARSHAN_DISABLE" before spawning the dataloader processes
+    #p0print(f"'DARSHAN_DISABLE' = {os.environ.get('DARSHAN_DISABLE', 'unset')}")
+    #os.system("export DARSHAN_ENABLE_NONMPI=1")
     dataloader = DataLoader(
             ds,
             batch_size=b, #self.config.model_dump().dataloader.batch_size[stage],
             # number of worker processes
             num_workers=w, #self.config.model_dump().dataloader.num_workers[stage],
-            pin_memory=pin_mem, #self.config.dataloader.pin_memory,
+            #pin_memory=pin_mem, #self.config.dataloader.pin_memory,
+            pin_memory=True, #self.config.dataloader.pin_memory,
             worker_init_fn=worker_init_func,
             # prefetch batches
             prefetch_factor=pf, #self.config.dataloader.prefetch_factor,
             persistent_workers=True,
+            multiprocessing_context="fork" #fork is the default, spawn and forkserver crash with '"No permission" (-17) instead of "Success" '
     )
     dl_iter=iter(dataloader)
+    #os.environ["DARSHAN_DISABLE"] = "1" 
+    #os.system("unset DARSHAN_ENABLE_NONMPI")
     p0print(f"Dataloader created in {time.time() - start_time:.2f}s.")
     return dl_iter
 
@@ -230,7 +248,10 @@ def get_parallel_info():
 
 def p0print(str):
     #I dont love reading an env var for every print
-    if MPI4PY_AVAILABLE and comm.Get_rank() == 0:
+    if MPI4PY_AVAILABLE:
+        if comm.Get_rank() == 0:
+            print(str)
+    else:
         print(str)
 
 def spawn_memory_monitor(test,res, dataset_index,count, r, bs, pf, nw, pm, rank, num_nodes, procs_per_node):
@@ -274,8 +295,17 @@ def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.
     #wrapper to worker_init_func which enables darshan on the dataloader processes
     #It calls 'anemoi-dataloader-microbenchmark/darshan/enable-darshan' which sets the relevant env vars
 def worker_init_func_w_darshan(worker_id: int):
+    #if MPI4PY_AVAILABLE:
+        #print("Initalising MPI in dataloader process")
+        #this is horrible, but since we use MPI in main.py, we have to launch darshan in MPI
+        #Therefore the dataloaders must also call MPI.init to be picked up by Darshan
+        #MPI.Init()
+        #print("MPI initalised in dataloader process")
     #os.system("./darshan/enable-darshan") #TODO replace with relative path
-    os.system("/ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark/darshan/enable-darshan")
+    #os.environ['DARSHAN_ENABLE_NONMPI']='1'
+    print(f"{worker_id=} {os.system('env | grep -i DARSHAN')}")
+    
+    #os.system("source /ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark/darshan/enable-darshan")
     default_worker_init_func(worker_id=worker_id)
     
 def enable_darshan(log_path):
@@ -326,11 +356,15 @@ def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_c
         
         
     global_times = None
-    rank = comm.Get_rank()
+    if MPI4PY_AVAILABLE:
+        rank = comm.Get_rank()
+    else:
+        rank = 0
     if rank == 0:
         global_times = np.empty([proc_count, count], dtype=np.float32)
         
-    comm.Gather(times, global_times, root=0)
+    if MPI4PY_AVAILABLE:
+        comm.Gather(times, global_times, root=0)
     
     if rank == 0:
         global_times=global_times.flatten() #from 2D [[count]*worldsize] to 1D [count*worldsize]
@@ -422,10 +456,10 @@ def manager():
     #config = get_bm_config("different-resolutions")
     #config = get_bm_config("4.4km")
     #config = get_bm_config("zarr-chunked-by-grid-dim")
-    config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr"]
-    config["resolutions"] =["o2560"]
-    count=2
-    config["num_workers"]=[1]
+    #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr"]
+    #config["resolutions"] =["o2560"]
+    count=1
+    config["num_workers"]=[2]
     config["prefetch_factors"]=[1]
     config["rollouts"] = [1]
     config["test"]="debug"
@@ -456,6 +490,7 @@ def manager():
 
     worker_init_func=default_worker_init_func
     if config["use_darshan"]:
+        p0print("Enabling Darshan on dataloader processes")
         worker_init_func=worker_init_func_w_darshan
    
     for res in config["resolutions"]:
@@ -464,6 +499,7 @@ def manager():
         datasets=[dataset for dataset in config["datasets"] if res in dataset]
         for dataset in datasets:
             for r in config["rollouts"]:
+                #os.system("source /ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark/darshan/enable-darshan")
                 ds = create_dataset(dataset, grid_indices=gi, rollout=r, num_nodes=num_nodes, num_gpus_per_node=num_gpus_per_node, num_gpus_per_model=num_gpus_per_model)
                 for bs in config["batch_sizes"]:
                     for pf in config["prefetch_factors"]:
@@ -486,6 +522,8 @@ def manager():
                                 except MemoryError:
                                     print("!!!OUT OF MEMORY!!!")
                                     pass
+
+                                del(dl_iter) #try to trigger __del__ on pytorch dataloader procs
                                 
                                 if save_output and config["monitor_memory"]:
                                     terminate_memory_monitor(mem_monitor_proc, csv, config["test"])
