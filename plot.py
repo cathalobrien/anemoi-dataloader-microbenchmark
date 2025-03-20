@@ -20,6 +20,8 @@ def generate_config_strings(varying_values):
     
     return config_strings
 
+#TODO   fix so it plots something when there is no difference. currently 'Error plotting: not enough values to unpack (expected 2, got 0)'
+#       Add a text listing at the bottom of the plot explaining 'ds*'
 def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out", outname="out"):
         file=csv
         filename=os.path.basename(file)
