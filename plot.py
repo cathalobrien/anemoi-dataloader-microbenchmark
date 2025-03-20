@@ -3,6 +3,7 @@ import pandas as pd
 import seaborn as sns
 import os
 import itertools
+import textwrap
 
 def get_varying_columns(grouped, columns):
     varying_columns = []
@@ -16,13 +17,55 @@ def generate_config_strings(varying_values):
     keys, values = zip(*varying_values)  # Separate keys and their unique values
     combinations = list(itertools.product(*values))  # Get all possible combinations
     
-    config_strings = ["\n".join(f"{key}={str(val)[:10]}" for key, val in zip(keys, combo)) for combo in combinations]
+    def get_string(key, val):
+            if key == "res-ds":
+                    return val
+            else:
+                    return f"{key}={str(val)}"
+
+    config_strings = ["\n".join(get_string(key, val) for key, val in zip(keys, combo)) for combo in combinations]
     
     return config_strings
 
+def add_ds_index(varying_cols, dataset_df):
+        need_index=False
+        for cols in varying_cols:
+                if cols[0] == "res-ds":
+                        need_index=True
+                        ds_col=cols
+                        break
+        if need_index:
+                #print("Adding index for datasets")
+                # Wrap and format text
+                #loop over all datasets
+                #print(ds_col[1])
+                names=[]
+                for entry in ds_col[1]:
+                        #get the index in the form 'o1280-ds[ID]', 
+                        index = entry.split("ds", 1)[-1]
+                        subset=dataset_df.loc[dataset_df["datasetID"] ==int(index)]
+                        ds_name=list(subset["dataset"])[0]
+                        #print(f"{index=}, {ds_name.iloc[0]=}")
+                        names.append(f"{entry}={ds_name}")
+                        #print(f"ds{index}={ds_name}")
+
+                wrapped_ds = [textwrap.fill(str(d), width=200) for d in names]  # Adjust width as needed
+                text_str = "\n".join(wrapped_ds)
+                #print(text_str)
+                
+                # Add text at the bottom of the plot
+                #plt.figtext(0.5, 0.12, text_str, wrap=True, ha="center", fontsize=8, bbox={"facecolor": "white", "alpha": 0.5, "pad": 5})
+                plt.annotate(text_str, xy=(0.5, 0.05), xycoords='figure fraction',
+                        ha="center", fontsize=8, va="bottom",
+                        bbox={"facecolor": "white", "alpha": 0.5, "pad": 5})
+
+                # Adjust layout to prevent cropping
+                plt.subplots_adjust(bottom=0.3)
+
 #TODO   fix so it plots something when there is no difference. currently 'Error plotting: not enough values to unpack (expected 2, got 0)'
 #       Add a text listing at the bottom of the plot explaining 'ds*'
-def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out", outname="out"):
+#       Replace res-ds with a global ds
+def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out", outname="out", header=""):
         file=csv
         filename=os.path.basename(file)
         #print(f"Loading {file}")
@@ -46,23 +89,30 @@ def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out", outname=
         # Extract relevant columns
         x = configs
         y = grouped["proc-throughput(byte/s)"] / 1024 / 1024
-
+        
         # Plot the bar chart
         plt.figure(figsize=(8, 5))
         plt.bar(x, y, color="royalblue")
         #plt.tick_params("x", rotation=45)
+        
+        #Generate an index at the bottom of the plot explaining what 'ds*' means
+        add_ds_index(varying_cols=varying_cols, dataset_df=dataset_df)
 
         # Labels and title
         plt.xlabel("Config")
         plt.ylabel("Throughput (MB/s)")
-        plt.title("Throughput per 'GPU'")
+        title="Dataloader throughput per 'GPU'"
+        if header != "":
+                title=f"{title} - {header}"
+        plt.title(title)
         #plt.grid() #goes on top
 
         # Show the plot
+        print(f"Savinging plot to {outdir}/{outname}.png")
         plt.savefig(f"{outdir}/{outname}.png")
-        plt.show()
+        #plt.show()
         
-#plot_anemoi_dataloader_benchmark("out/anemoi-dataloader-microbenchmark.csv")
+#plot_anemoi_dataloader_benchmark("dev.csv")
 
 def plot_mem_monitor(csv, show_plot=True, outdir="out", filename_prefix=""):
         file=csv
@@ -110,3 +160,6 @@ def plot_mem_monitor(csv, show_plot=True, outdir="out", filename_prefix=""):
         plt.savefig(f"{out_file}")
         if show_plot:
                 plt.show()
+
+if __name__ == "__main__":
+    plot_anemoi_dataloader_benchmark()

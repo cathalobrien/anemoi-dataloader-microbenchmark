@@ -54,7 +54,7 @@ def get_parallel_info(args):
         
     local_rank = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK", int(os.environ.get("SLURM_LOCALID", 0))))  # Rank within a node, between 0 and num_gpus
     procs_per_node = int(os.environ.get("OMPI_COMM_WORLD_LOCAL_SIZE", int(os.environ.get("SLURM_TASKS_PER_NODE", '1').split('(')[0]))) #number of processes on the current node
-    num_nodes= world_size/procs_per_node
+    num_nodes= world_size//procs_per_node
     p0print(f"Running in parallel across {world_size} processes over {int(num_nodes)} nodes")
    
     #Optionally, get num_gpus_per_model and read_group_size from args
@@ -145,14 +145,12 @@ def compute_run_stats(global_times, local_times, run_count, num_workers, proc_co
     else:
         return [None, None]
 
-def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.csv",save_output=True):
+def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.csv",save_output=True, outdir="out/"):
     if save_output and rank==0:
         #write_header = not os.path.exists(filename)
-        outdir=f"out/"
         output=f"{outdir}/{filename}"
         os.makedirs(outdir, exist_ok=True)
         f = open(output, "w")
-        print(f"Creating output file: {output}")
         #if write_header:
         header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),worker-throughput(byte/s),proc-throughput(byte/s),global-throughput(byte/s)\n"
         f.write(header)
@@ -225,8 +223,16 @@ def get_bm_config(test="single-worker-bm"):
         config["num_workers"] = [1,2,4,8]
         config["per_worker_count"]=True
     elif test == "zarr-chunked-by-grid-dim":
-        config["resolutions"] = ["o2560"]
-        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr", "/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v3-1week.zarr"]
+        #config["resolutions"] = ["o2560"]
+        #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr", "/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v3-1week.zarr"]
+        config["resolutions"] = ["o1280"]
+        #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-8gridchunks.zarr", "aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-4gridchunks.zarr"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-4gridchunks.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-8gridchunks.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-32gridchunks.zarr"]
+        #config["datasets"] = [ "aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-4gridchunks.zarr"]
+    elif test == "test-custom":
+        config["resolutions"] = ["o1280"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-8gridchunks.zarr"]
+
     else:
         raise ValueError(f"Error. invalid benchmark. Please select one of '{tests}'")
     
@@ -239,24 +245,26 @@ def manager():
     parser.add_argument('-r','--read-group-size',type=int, default=0)
     args = parser.parse_args()
     
-    config = get_bm_config("single-worker-bm")
+    #config = get_bm_config("single-worker-bm")
     #config = get_bm_config("different-resolutions")
     #config = get_bm_config("4.4km")
-    #config = get_bm_config("zarr-chunked-by-grid-dim")
+    config = get_bm_config("zarr-chunked-by-grid-dim")
+    #config = get_bm_config("test-custom")
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr"]
     #config["resolutions"] =["o2560"]
-    count=1
-    config["num_workers"]=[1,2]
+    count=10
+    config["num_workers"]=[1]
     config["prefetch_factors"]=[1]
     config["rollouts"] = [1]
-    config["test"]="debug"
+    #config["test"]="debug"
     
     global_rank, world_size, procs_per_node, num_nodes, num_gpus_per_model, read_group_size = get_parallel_info(args)
     
     save_output=True
     dir=f"out/{config['test']}"
-    f = create_results_file(config,global_rank, save_output=save_output) #could do this in __init__ if it was a class
+    #TODO give unique filename
+    f = create_results_file(config,global_rank, filename=f"{config['test']}-J{os.environ.get('SLURM_JOBID','0')}.csv", outdir=dir, save_output=save_output) #could do this in __init__ if it was a class
 
     for res in config["resolutions"]:
         gi = setup_grid_indices(res, read_group_size=read_group_size)
@@ -264,6 +272,7 @@ def manager():
         datasets=[dataset for dataset in config["datasets"] if res in dataset]
         for dataset in datasets:
             for r in config["rollouts"]:
+                #p0print(dataset)
                 #os.system("source /ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark/darshan/enable-darshan")
                 ds = create_dataset(dataset, grid_indices=gi, rollout=r, num_nodes=num_nodes, num_gpus_per_node=procs_per_node, num_gpus_per_model=num_gpus_per_model)
                 for bs in config["batch_sizes"]:
@@ -296,7 +305,7 @@ def manager():
     if save_output and f is not None:
         f.close()
         try:
-            plot_anemoi_dataloader_benchmark(f.name, outdir=dir, outname=f"{config['test']}-j{os.environ.get('SLURM_JOBID','0')}-{int(time.time())}")
+            plot_anemoi_dataloader_benchmark(f.name, outdir=dir, outname=f"{config['test']}-j{os.environ.get('SLURM_JOBID','0')}-{int(time.time())}", header=f"({num_nodes}N, {procs_per_node}gpn, {num_gpus_per_model}gpm, {read_group_size}gpr)")
         except ValueError as err:
             p0print(f"Error plotting: {err}")
                                 
@@ -312,3 +321,4 @@ if __name__ == "__main__":
 #       Understand why the pytorch insufficient cpu core message pops up even when my job has enough cores allocated
 #       Add requirements.txt
 #       replace p0print with LOGGER
+#       refactor plotting so all plots go under a dir for a run

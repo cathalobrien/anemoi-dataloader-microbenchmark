@@ -11,13 +11,17 @@
 
 cd /ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark
 source env.sh
-source darshan/enable-darshan
+#source darshan/enable-darshan
 
-grep -HP 'llite|cgroup' $PWD/config.h
+#grep -HP 'llite|cgroup' $PWD/config.h
+
+
+# to make GPR=GPM/2: srun python main.py -r $((SLURM_NTASKS / 2 )) -m $SLURM_NTASKS
+
 
 export DARSHAN_LOG_PATH=$DARSHAN_LOG_PATH/slurm-$SLURM_JOBID
 mkdir -p $DARSHAN_LOG_PATH
-DARSHAN_ENABLE_NONMPI=1 srun python main.py
-#srun python main.py
+#DARSHAN_ENABLE_NONMPI=1 srun python main.py
+srun python main.py -r $((SLURM_NTASKS / 2 )) -m $SLURM_NTASKS
 
-grep -HP 'llite|cgroup' $PWD/endt.h
+#grep -HP 'llite|cgroup' $PWD/endt.h

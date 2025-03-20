@@ -129,7 +129,7 @@ def create_dataset(dataset, grid_indices, rollout=1, num_nodes=1, num_gpus_per_n
     start_time=time.time()
     ds = _get_dataset(
                 #open_dataset(self.config.model_dump().dataloader.training),
-                open_dataset(dataset=dataset, start=None, end=202312, frequency=frequency, drop=[]),
+                open_dataset(dataset=dataset, start=None, end=None, frequency=frequency, drop=[]),
                 grid_indices,
                 #SyntheticDataset(),
                 label="train",
