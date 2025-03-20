@@ -11,6 +11,13 @@
 
 cd /ec/res4/hpcperm/naco/aifs/anemoi-dataloader-microbenchmark
 source env.sh
+source darshan/enable-darshan
 
-#srun --export=ALL,LD_PRELOAD=$LIBDARSHAN  #to run with darshan
-srun python main.py
+grep -HP 'llite|cgroup' $PWD/config.h
+
+export DARSHAN_LOG_PATH=$DARSHAN_LOG_PATH/slurm-$SLURM_JOBID
+mkdir -p $DARSHAN_LOG_PATH
+DARSHAN_ENABLE_NONMPI=1 srun python main.py
+#srun python main.py
+
+grep -HP 'llite|cgroup' $PWD/endt.h

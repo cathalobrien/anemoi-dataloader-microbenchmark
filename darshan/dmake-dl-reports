@@ -1,0 +1,27 @@
+#!/bin/bash
+#set -x
+#TODO suppress all the warnings it prints
+dir=$1
+if [[ $1 == "" ]]; then
+	echo "error. please pass path to a dir containing darsahn logs as first arg. exiting..."
+	exit 1
+fi
+mkdir -p darshan-reports
+i=0
+for report in $dir/*; do
+	if [[ $report =~ "python" ]]; then
+		if dparse $report | grep -q 'data/[0-9]' > /dev/null 2>&1; then
+			i=$((i+1))
+			#echo "'$report' is from a dataloader"
+			dreport $report --output $dir/pytorch-dl-$i.pdf
+
+		else
+			#non-dl python report
+			rm -f $report
+		fi
+	else
+		#delete non-python reports
+		#echo "rm -f $report"
+		rm -f $report
+		fi
+done
