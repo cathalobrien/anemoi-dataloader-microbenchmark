@@ -141,9 +141,9 @@ def compute_run_stats(global_times, local_times, run_count, num_workers, proc_co
         p0print(f"Estimated throughput upper-bound: {1.0/mean_time_per_process:.3f}it/s ({format(av_throughput_per_process)}B/s / {format(input_batch_size)}B)")
         latency=mean_time_per_worker
         p0print(f"Est. latency to load the initial batch: {latency:.2f}s")
-        return [mean_time_per_process, av_throughput_per_process]
+        return [mean_time_per_process, av_throughput_per_process, input_batch_size]
     else:
-        return [None, None]
+        return [None, None, None]
 
 def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.csv",save_output=True, outdir="out/"):
     if save_output and rank==0:
@@ -152,7 +152,7 @@ def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.
         os.makedirs(outdir, exist_ok=True)
         f = open(output, "w")
         #if write_header:
-        header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),worker-throughput(byte/s),proc-throughput(byte/s),global-throughput(byte/s)\n"
+        header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),worker-throughput(byte/s),proc-throughput(byte/s),global-throughput(byte/s),input_batch_per_proc(bytes)\n"
         f.write(header)
         #f.flush()
         return f
@@ -160,9 +160,9 @@ def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.
         return None
     
 def save_results(f, results, res, count, ds, r, bs, pf, nw, pm, num_procs, save_output=True):
-    #header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),throughput(byte/s)\n"
+    #header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),throughput(byte/s),input_batch_per_proc(bytes)\n"
     if save_output and f is not None:
-        line=f"{res},{ds},{r},{bs},{nw},{pf},{pm},{count},{num_procs},{results[0]},{results[1]/nw},{results[1]},{results[1]*num_procs}\n"
+        line=f"{res},{ds},{r},{bs},{nw},{pf},{pm},{count},{num_procs},{results[0]},{results[1]/nw},{results[1]},{results[1]*num_procs},{results[2]}\n"
         f.write(line)
         #f.flush()
     
@@ -223,17 +223,22 @@ def get_bm_config(test="single-worker-bm"):
         config["num_workers"] = [1,2,4,8]
         config["per_worker_count"]=True
     elif test == "zarr-chunked-by-grid-dim":
-        #config["resolutions"] = ["o2560"]
-        #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr", "/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v3-1week.zarr"]
         config["resolutions"] = ["o1280"]
-        #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-8gridchunks.zarr", "aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-4gridchunks.zarr"]
         config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-4gridchunks.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-8gridchunks.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-32gridchunks.zarr"]
+    elif test == "zarr-chunked-by-grid-dim-s2":
+        config["resolutions"] = ["o1280"]
+        config["datasets"] = ["/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr"]
         #config["datasets"] = [ "aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-4gridchunks.zarr"]
     elif test == "test-custom":
         config["resolutions"] = ["o1280"]
         config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-8gridchunks.zarr"]
 
+    elif test == "9km-at-scale":
+        config["resolutions"] = ["o1280"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr", "/lus/st2/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr"]
+        config["num_workers"]=[4]
     else:
+        
         raise ValueError(f"Error. invalid benchmark. Please select one of '{tests}'")
     
     p0print(f"Running a benchmark with the config '{test}'")
@@ -248,15 +253,15 @@ def manager():
     #config = get_bm_config("single-worker-bm")
     #config = get_bm_config("different-resolutions")
     #config = get_bm_config("4.4km")
-    config = get_bm_config("zarr-chunked-by-grid-dim")
+    config = get_bm_config("9km-at-scale")
     #config = get_bm_config("test-custom")
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr"]
     #config["resolutions"] =["o2560"]
     count=10
-    config["num_workers"]=[1]
-    config["prefetch_factors"]=[1]
-    config["rollouts"] = [1]
+    #config["num_workers"]=[1]
+    #config["prefetch_factors"]=[1]
+    #config["rollouts"] = [1]
     #config["test"]="debug"
     
     global_rank, world_size, procs_per_node, num_nodes, num_gpus_per_model, read_group_size = get_parallel_info(args)
@@ -305,7 +310,7 @@ def manager():
     if save_output and f is not None:
         f.close()
         try:
-            plot_anemoi_dataloader_benchmark(f.name, outdir=dir, outname=f"{config['test']}-j{os.environ.get('SLURM_JOBID','0')}-{int(time.time())}", header=f"({num_nodes}N, {procs_per_node}gpn, {num_gpus_per_model}gpm, {read_group_size}gpr)")
+            plot_anemoi_dataloader_benchmark(f.name, outdir=dir, outname=f"{config['test']}-j{os.environ.get('SLURM_JOBID','0')}-{int(time.time())}", header=f"({num_nodes}N, {procs_per_node}gpn, {num_gpus_per_model}gpm, {read_group_size}gpr)", plot_iter_per_s=True)
         except ValueError as err:
             p0print(f"Error plotting: {err}")
                                 

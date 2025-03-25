@@ -65,7 +65,8 @@ def add_ds_index(varying_cols, dataset_df):
 #TODO   fix so it plots something when there is no difference. currently 'Error plotting: not enough values to unpack (expected 2, got 0)'
 #       Add a text listing at the bottom of the plot explaining 'ds*'
 #       Replace res-ds with a global ds
-def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out", outname="out", header=""):
+#size of the input batch in MB
+def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out", outname="out", header="", plot_iter_per_s=False):
         file=csv
         filename=os.path.basename(file)
         #print(f"Loading {file}")
@@ -88,7 +89,11 @@ def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out", outname=
 
         # Extract relevant columns
         x = configs
-        y = grouped["proc-throughput(byte/s)"] / 1024 / 1024
+        if plot_iter_per_s:
+                #({format(av_throughput_per_process)}B/s / {format(input_batch_size)}B)")
+                y = grouped["proc-throughput(byte/s)"] / grouped['input_batch_per_proc(bytes)']
+        else:
+                y = grouped["proc-throughput(byte/s)"] / 1024 / 1024
         
         # Plot the bar chart
         plt.figure(figsize=(8, 5))
@@ -102,13 +107,16 @@ def plot_anemoi_dataloader_benchmark(csv, show_plot=True, outdir="out", outname=
         plt.xlabel("Config")
         plt.ylabel("Throughput (MB/s)")
         title="Dataloader throughput per 'GPU'"
+        if plot_iter_per_s:
+                plt.ylabel("Throughput (iter/s)")
+                title="Per-GPU Throughput upper-bound from filesystem"
         if header != "":
                 title=f"{title} - {header}"
         plt.title(title)
         #plt.grid() #goes on top
 
         # Show the plot
-        print(f"Savinging plot to {outdir}/{outname}.png")
+        print(f"Saving plot to {outdir}/{outname}.png")
         plt.savefig(f"{outdir}/{outname}.png")
         #plt.show()
         
@@ -162,4 +170,4 @@ def plot_mem_monitor(csv, show_plot=True, outdir="out", filename_prefix=""):
                 plt.show()
 
 if __name__ == "__main__":
-    plot_anemoi_dataloader_benchmark()
+    plot_anemoi_dataloader_benchmark("dev.csv", plot_iter_per_s=True)
