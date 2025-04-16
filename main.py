@@ -161,7 +161,7 @@ def create_results_file(config,rank, filename="anemoi-dataloader-microbenchmark.
     
 def save_results(f, results, res, count, ds, r, bs, pf, nw, pm, num_procs, save_output=True):
     #header="res,dataset,rollout,batch_size,num_workers,prefetch_factor,pin_memory,count,num_procs,elapsed(s),throughput(byte/s),input_batch_per_proc(bytes)\n"
-    if save_output and f is not None:
+    if save_output and f is not None and results[0] is not None:
         line=f"{res},{ds},{r},{bs},{nw},{pf},{pm},{count},{num_procs},{results[0]},{results[1]/nw},{results[1]},{results[1]*num_procs},{results[2]}\n"
         f.write(line)
         #f.flush()
@@ -169,24 +169,30 @@ def save_results(f, results, res, count, ds, r, bs, pf, nw, pm, num_procs, save_
 #TODO distinguish between per node and multinode throughput
 def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_count=1, rollout=1, sleep_time=0):
     #clear_page_cache() #permission denied on Atos
-
-    #each process maintains a list of their times to load
-    #this will be gathered on proc 0 at the end of the run and the mean, min, max etc will be calculated
-    times = np.array(range(0,count), dtype=np.float32)
-    size = None
-    for i in range(0,count):
-        p0print(f"Iteration {i}")
-        batch, times[i] = load_batch(dataloader_iterator)
+    try:
         
-        if size is None: #Compute size only once at the start
-            size = batch.element_size() * batch.nelement()
-            
-        if simulate_compute:
-            simulate_iter(rollout=rollout, sleep_time=sleep_time)
 
-    global_times = gather_timings(times, proc_count, count)
-    
-    return compute_run_stats(global_times, times, count, num_workers, proc_count, size)
+        #each process maintains a list of their times to load
+        #this will be gathered on proc 0 at the end of the run and the mean, min, max etc will be calculated
+        times = np.array(range(0,count), dtype=np.float32)
+        size = None
+        for i in range(0,count):
+            p0print(f"Iteration {i}")
+            batch, times[i] = load_batch(dataloader_iterator)
+            
+            if size is None: #Compute size only once at the start
+                size = batch.element_size() * batch.nelement()
+                
+            if simulate_compute:
+                simulate_iter(rollout=rollout, sleep_time=sleep_time)
+
+        global_times = gather_timings(times, proc_count, count)
+        
+        return compute_run_stats(global_times, times, count, num_workers, proc_count, size)
+    except RuntimeError as err:
+        p0print(f"OOM. {err}")
+        return [None,None,None]
+        
     
 def get_bm_config(test="single-worker-bm"):
     #set defaults
@@ -237,6 +243,12 @@ def get_bm_config(test="single-worker-bm"):
         config["resolutions"] = ["o1280"]
         config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr", "/lus/st2/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr"]
         config["num_workers"]=[4]
+    elif test == "downscaling":
+        config["resolutions"] = ["o320"]
+        #config["datasets"] = ["/home/mlx/ai-ml/datasets/downscaling-od-cf-enfh-0001-mars-o1280-2003-2023-12h-v3.zarr","/home/mlx/ai-ml/datasets/downscaling-rd-fc-oper-i4ql-mars-o2560-2023-2024-24h-v1.zarr"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/downscaling-od-cf-enfh-0001-mars-o320-2003-2023-12h-v3-forcings.zarr","/ec/res4/scratch/naco/aifs/inputs/custom/downscaling-od-cf-enfh-0001-mars-o320-2003-2023-12h-v3-forcings-16gridchunks.zarr"]
+        config["num_workers"]=[1,4]
+        
     else:
         
         raise ValueError(f"Error. invalid benchmark. Please select one of '{tests}'")
@@ -253,7 +265,11 @@ def manager():
     #config = get_bm_config("single-worker-bm")
     #config = get_bm_config("different-resolutions")
     #config = get_bm_config("4.4km")
-    config = get_bm_config("9km-at-scale")
+    config = get_bm_config("zarr-chunked-by-grid-dim")
+    #just 16
+    config["datasets"] = ["/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr"]
+    #just 32
+    #config["datasets"] = ["/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-32gridchunks.zarr"]
     #config = get_bm_config("test-custom")
     
     #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr"]
@@ -327,3 +343,4 @@ if __name__ == "__main__":
 #       Add requirements.txt
 #       replace p0print with LOGGER
 #       refactor plotting so all plots go under a dir for a run
+#       Add raw bandwidth tests with dd
