@@ -115,7 +115,7 @@ def gather_timings(local_times, proc_count, run_count):
 
 #P0 computes stats for global timing data across all procs
 def compute_run_stats(global_times, local_times, run_count, num_workers, proc_count, input_batch_size):
-    if comm.Get_rank() == 0:
+    if not MPI4PY_AVAILABLE or comm.Get_rank() == 0:
         global_times=global_times.flatten() #from 2D [[count]*worldsize] to 1D [count*worldsize]
         global_times =np.flip(np.sort(global_times)) #largest first
         mean_time_per_process=global_times.mean()
@@ -244,10 +244,10 @@ def get_bm_config(test="single-worker-bm"):
         config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr", "/lus/st2/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr"]
         config["num_workers"]=[4]
     elif test == "downscaling":
-        config["resolutions"] = ["o320"]
+        config["resolutions"] = ["o1280"]
         #config["datasets"] = ["/home/mlx/ai-ml/datasets/downscaling-od-cf-enfh-0001-mars-o1280-2003-2023-12h-v3.zarr","/home/mlx/ai-ml/datasets/downscaling-rd-fc-oper-i4ql-mars-o2560-2023-2024-24h-v1.zarr"]
-        config["datasets"] = ["/home/mlx/ai-ml/datasets/downscaling-od-cf-enfh-0001-mars-o320-2003-2023-12h-v3-forcings.zarr","/ec/res4/scratch/naco/aifs/inputs/custom/downscaling-od-cf-enfh-0001-mars-o320-2003-2023-12h-v3-forcings-16gridchunks.zarr"]
-        config["num_workers"]=[1,4]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/downscaling-od-cf-enfh-0001-mars-o1280-2003-2023-12h-v3.zarr"]
+        config["num_workers"]=[1,4,6,8]
         
     else:
         
@@ -265,9 +265,9 @@ def manager():
     #config = get_bm_config("single-worker-bm")
     #config = get_bm_config("different-resolutions")
     #config = get_bm_config("4.4km")
-    config = get_bm_config("zarr-chunked-by-grid-dim")
+    config = get_bm_config("downscaling")
     #just 16
-    config["datasets"] = ["/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr"]
+    #config["datasets"] = ["/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr"]
     #just 32
     #config["datasets"] = ["/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-32gridchunks.zarr"]
     #config = get_bm_config("test-custom")
