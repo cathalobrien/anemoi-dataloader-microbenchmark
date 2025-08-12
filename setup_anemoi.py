@@ -14,7 +14,8 @@
 
 from anemoi.datasets.data import open_dataset
 from anemoi.training.data.dataset import NativeGridDataset
-from anemoi.training.utils.worker_init import worker_init_func as  default_worker_init_func
+#from anemoi.training.utils.worker_init import worker_init_func as  default_worker_init_func
+from anemoi.training.data.dataset import worker_init_func as default_worker_init_func
 from anemoi.training.data.grid_indices import FullGrid
 from anemoi.utils.dates import frequency_to_seconds
 
