@@ -279,7 +279,7 @@ def manager():
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--gpus-per-model', type=int, default=0)
     parser.add_argument('-r','--read-group-size',type=int, default=0)
-    parser.add_argument('-c','--config',type=str, description=f"Select the benchmarking config. see main.py for the options or to add your own")
+    parser.add_argument('-c','--config',type=str, help=f"Select the benchmarking config. see main.py for the options or to add your own")
     args = parser.parse_args()
     
     config = get_bm_config(args.config)
