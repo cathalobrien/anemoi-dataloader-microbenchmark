@@ -7,7 +7,11 @@ import math
 
 from misc import maybe_import_mpi, format, p0print
 from memory_monitor import run_mem_monitor
-from plot import plot_mem_monitor, plot_anemoi_dataloader_benchmark
+PLOTTING_AVAILABLE=True
+try:
+    from plot import plot_mem_monitor, plot_anemoi_dataloader_benchmark
+except ImportError:
+    PLOTTING_AVAILABLE=False
 from setup_anemoi import setup_grid_indices, create_dataloader, create_dataset
  
 MPI4PY_AVAILABLE, comm = maybe_import_mpi() 
@@ -92,7 +96,7 @@ def terminate_memory_monitor(p, filename, test):
     #TODO call a mem monitor internal function to close the file before terminating
     if p is not None:
         p.terminate()
-    if filename is not None:
+    if filename is not None and PLOTTING_AVAILABLE:
         plot_mem_monitor(filename,show_plot=False,outdir=os.path.dirname(filename),filename_prefix=test)
 
 def gather_timings(local_times, proc_count, run_count):
@@ -114,7 +118,7 @@ def gather_timings(local_times, proc_count, run_count):
     return global_times
 
 #P0 computes stats for global timing data across all procs
-def compute_run_stats(global_times, local_times, run_count, num_workers, proc_count, input_batch_size):
+def compute_run_stats(global_times, local_times, run_count, num_workers, proc_count, procs_per_node, input_batch_size):
     if not MPI4PY_AVAILABLE or comm.Get_rank() == 0:
         global_times=global_times.flatten() #from 2D [[count]*worldsize] to 1D [count*worldsize]
         global_times =np.flip(np.sort(global_times)) #largest first
@@ -130,13 +134,14 @@ def compute_run_stats(global_times, local_times, run_count, num_workers, proc_co
         time_std_dev=global_times.std()
         av_throughput_per_worker=input_batch_size/mean_time_per_worker 
         av_throughput_per_process=av_throughput_per_worker*num_workers 
+        av_throughput_per_node=av_throughput_per_process*procs_per_node
         av_throughput_global=av_throughput_per_process*proc_count
         
         p0print(f"Total time for {run_count} loads: {total_time:.2f}s")
         p0print(f"avg={mean_time_per_process:.2f}s, max={max_time:.2f}s, min={min_time:.2f}s, std-dev={time_std_dev:.4f}s")
         if num_workers > 1:
             p0print(f"From 'Stalls' (top 1/{num_workers}): avg={stalls.mean():.2f}s, max={stalls.max():.2f}s, min={stalls.min():.2f}s, std-dev={stalls.std():.4f}s")
-        p0print(f"per-worker BW: {format(av_throughput_per_worker)}B/s,  per-process BW: {format(av_throughput_per_process)}B/s, global BW: {format(av_throughput_global)}B/s")
+        p0print(f"per-worker BW: {format(av_throughput_per_worker)}B/s,  per-process BW: {format(av_throughput_per_process)}B/s, per-node BW: {format(av_throughput_per_node)}B/s, global BW: {format(av_throughput_global)}B/s")
  
         p0print(f"Estimated throughput upper-bound: {1.0/mean_time_per_process:.3f}it/s ({format(av_throughput_per_process)}B/s / {format(input_batch_size)}B)")
         latency=mean_time_per_worker
@@ -167,7 +172,7 @@ def save_results(f, results, res, count, ds, r, bs, pf, nw, pm, num_procs, save_
         #f.flush()
     
 #TODO distinguish between per node and multinode throughput
-def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_count=1, rollout=1, sleep_time=0):
+def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_count=1, procs_per_node=1, rollout=1, sleep_time=0):
     #clear_page_cache() #permission denied on Atos
     try:
         
@@ -188,7 +193,7 @@ def run(dataloader_iterator, num_workers, count=5, simulate_compute=True, proc_c
 
         global_times = gather_timings(times, proc_count, count)
         
-        return compute_run_stats(global_times, times, count, num_workers, proc_count, size)
+        return compute_run_stats(global_times, times, count, num_workers, proc_count, procs_per_node, size)
     except RuntimeError as err:
         p0print(f"OOM. {err}")
         return [None,None,None]
@@ -243,6 +248,20 @@ def get_bm_config(test="single-worker-bm"):
         config["resolutions"] = ["o1280"]
         config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr", "/lus/st2/ai-bm/datasets/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr"]
         config["num_workers"]=[4]
+    elif test == "4km-at-scale":
+        config["resolutions"] = ["o2560"]
+        config["num_workers"]=[1,4]
+        #config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week.zarr", "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week-8gridchunks.zarr",
+        config["datasets"] = ["/ec/res4/scratch/naco/aifs/inputs/custom/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week-8gridchunks.zarr",
+                              "/ec/res4/scratch/naco/aifs/inputs/custom/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week-64gridchunks.zarr", "/lus/h2tcst01/ai-bm/datasets/aifs-rd-an-lwda-ifc3-mars-o2560-2023-2023-6h-v1-1week-8gridchunks.zarr"]
+    elif test == "n320-at-scale":
+        config["resolutions"] = ["n320"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-ea-an-oper-0001-mars-n320-1979-2022-6h-v6.zarr"]
+        config["num_workers"]=[4,8,12,16]
+    elif test == "o800":
+        config["resolutions"] = ["o800"]
+        config["datasets"] = ["/home/mlx/ai-ml/datasets/aifs-benchmarking-ea-an-oper-0001-mars-o800-2023-2024-1h-v1.zarr"]
+        config["num_workers"]=[2,4,8,12]
     elif test == "downscaling":
         config["resolutions"] = ["o1280"]
         #config["datasets"] = ["/home/mlx/ai-ml/datasets/downscaling-od-cf-enfh-0001-mars-o1280-2003-2023-12h-v3.zarr","/home/mlx/ai-ml/datasets/downscaling-rd-fc-oper-i4ql-mars-o2560-2023-2024-24h-v1.zarr"]
@@ -260,12 +279,13 @@ def manager():
     parser = argparse.ArgumentParser()
     parser.add_argument('-m', '--gpus-per-model', type=int, default=0)
     parser.add_argument('-r','--read-group-size',type=int, default=0)
+    parser.add_argument('-c','--config',type=str, description=f"Select the benchmarking config. see main.py for the options or to add your own")
     args = parser.parse_args()
     
-    #config = get_bm_config("single-worker-bm")
+    config = get_bm_config(args.config)
     #config = get_bm_config("different-resolutions")
     #config = get_bm_config("4.4km")
-    config = get_bm_config("downscaling")
+    #config = get_bm_config("4km-at-scale")
     #just 16
     #config["datasets"] = ["/ec/res4/scratch/naco/aifs/inputs/custom/aifs-od-an-oper-0001-mars-o1280-2023-2023-6h-v1-one-month-16gridchunks.zarr"]
     #just 32
@@ -312,7 +332,7 @@ def manager():
                                 dl_iter = create_dataloader(ds, b=bs, w=nw, pf=pf, pin_mem=pm)
                                 
                                 try:
-                                    results = run(dl_iter, nw, count=count, simulate_compute=False, proc_count=world_size, rollout=r, sleep_time=25)
+                                    results = run(dl_iter, nw, count=count, simulate_compute=False, proc_count=world_size, procs_per_node=procs_per_node, rollout=r, sleep_time=25)
                                     save_results(f, results, res, count, dataset, r, bs, pf, nw, pm, world_size, save_output=save_output)
                                 except MemoryError:
                                     print("!!!OUT OF MEMORY!!!")
@@ -325,10 +345,11 @@ def manager():
                                 
     if save_output and f is not None:
         f.close()
-        try:
-            plot_anemoi_dataloader_benchmark(f.name, outdir=dir, outname=f"{config['test']}-j{os.environ.get('SLURM_JOBID','0')}-{int(time.time())}", header=f"({num_nodes}N, {procs_per_node}gpn, {num_gpus_per_model}gpm, {read_group_size}gpr)", plot_iter_per_s=True)
-        except ValueError as err:
-            p0print(f"Error plotting: {err}")
+        if PLOTTING_AVAILABLE:
+            try:
+                plot_anemoi_dataloader_benchmark(f.name, outdir=dir, outname=f"{config['test']}-j{os.environ.get('SLURM_JOBID','0')}-{int(time.time())}", header=f"({num_nodes}N, {procs_per_node}gpn, {num_gpus_per_model}gpm, {read_group_size}gpr)", plot_iter_per_s=True)
+            except ValueError as err:
+                p0print(f"Error plotting: {err}")
                                 
 
 if __name__ == "__main__":
@@ -338,7 +359,7 @@ if __name__ == "__main__":
 #       measure time spent in HtoD copies
 #       Split the 'anemoi' and benchmarking code into different files
 #       Gather time spent at barrier for each proc and analyse them, maybe there's some repeast offenders
-#       distinguish between per node and global throughput (think atos node has 480MB/s max BW)
+#       distinguish between per node and global throughput (think atos node has 480MB/s max BW, has a 25GB/s NIC)
 #       Understand why the pytorch insufficient cpu core message pops up even when my job has enough cores allocated
 #       Add requirements.txt
 #       replace p0print with LOGGER
