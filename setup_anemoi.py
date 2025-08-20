@@ -37,6 +37,8 @@ def get_grid_points(res):
         return 26306560
     elif res == "o1280":
         return 6599680
+    elif res == "o800":
+        return 2588800
     elif res == "n320":
         return 542080
     else:
